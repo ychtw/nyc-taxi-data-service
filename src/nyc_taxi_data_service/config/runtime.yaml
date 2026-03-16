@@ -8,7 +8,9 @@ environments:
   dev:
     storage:
       target_storage_type: local
-      target_base_path: data/raw
+      # group settings by type
+      local_settings:
+        target_base_path: data/raw
 
     time_frame:
       # earliest month the user wants to request

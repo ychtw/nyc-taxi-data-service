@@ -1,86 +1,12 @@
 import json
 from datetime import datetime, timezone
-from importlib.resources import files
 from pathlib import Path
 
-import yaml
-
-
-def load_sources_config(config_path: Path | None = None) -> dict:
-    """
-    Load sources config, which contains:
-    - TLC base URL
-    - file extension
-    - availability start month by vehicle type
-    - file naming patterns
-
-    Args:
-        config_path: A path to the data sources config yaml file. If None, use the default `config/sources.yaml`
-
-    Returns:
-        A dictionary of the input yaml config regarding data sources
-    """
-    if config_path is None:
-        config_file = files("nyc_taxi_data_service.config").joinpath("sources.yaml")
-    else:
-        config_file = config_path
-
-    with config_file.open("r", encoding="utf-8") as f:
-        return yaml.safe_load(f)
-
-
-def load_runtime_config(config_path: Path | None = None) -> dict:
-    """
-    Load runtime config, which contains:
-    - active environment
-    - manifest output path
-    - storage config
-    - default request time frame
-    - default vehicle types
-
-    Args:
-        config_path: A path to the runtime config yaml file. If None, use the default `config/runtime.yaml`
-
-    Returns:
-        A dictionary of the input yaml config regarding runtime settings
-    """
-    if config_path is None:
-        config_file = files("nyc_taxi_data_service.config").joinpath("runtime.yaml")
-    else:
-        config_file = Path(config_path)
-
-    with config_file.open("r", encoding="utf-8") as f:
-        return yaml.safe_load(f)
-
-
-def resolve_runtime_config(runtime_config: dict) -> dict:
-    """
-    Resolve runtime config based on active_environment (dev / prod)
-
-    Args:
-        runtime_config: a dictionary of the config regarding runtime settings
-                        (may contain both settings for dev and prod)
-
-    Returns:
-        A dictionary of the config regarding actual runtime settings to be used in the request
-    """
-    # get active environment (dev or prod)
-    active_environment = runtime_config["active_environment"]
-
-    # get default config
-    defaults = runtime_config.get("defaults", {})
-
-    # get config for the active environment
-    env_config = runtime_config["environments"][active_environment]
-
-    # update default based on settings of the active environment
-    resolved = dict(defaults)
-    resolved.update(env_config)
-    resolved["active_environment"] = (
-        active_environment  # record the active environment in result
-    )
-
-    return resolved
+from nyc_taxi_data_service.config.config_loader import (
+    load_runtime_config,
+    load_sources_config,
+    resolve_runtime_config,
+)
 
 
 def generate_year_months(start_year_month: str, end_year_month: str) -> list[str]:
