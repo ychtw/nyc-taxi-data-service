@@ -1,0 +1,18 @@
+tlc_website:
+  base_url: "https://d37ci6vzurychx.cloudfront.net/trip-data"
+  file_extension: "parquet"
+
+vehicle_types:
+  yellow:
+    # earliest month the source has data
+    available_from: "2009-01"
+    name_pattern: "yellow_tripdata"
+  green:
+    available_from: "2013-08"
+    name_pattern: "green_tripdata"
+  fhv:
+    available_from: "2015-01"
+    name_pattern: "fhv_tripdata"
+  fhvhv:
+    available_from: "2019-02"
+    name_pattern: "fhvhv_tripdata"

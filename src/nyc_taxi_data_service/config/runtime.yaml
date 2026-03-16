@@ -1,0 +1,22 @@
+active_environment: dev
+
+defaults:
+  manifest:
+    output_path: data/manifests
+
+environments:
+  dev:
+    storage:
+      target_storage_type: local
+      target_base_path: data/raw
+
+    time_frame:
+      # earliest month the user wants to request
+      start_year_month: "2025-01"
+      end_year_month: "2025-03"
+
+    vehicle_types:
+      - yellow
+      - green
+      # - fhv
+      # - fhvhv
