@@ -1,7 +1,10 @@
+import logging
 from importlib.resources import files
 from pathlib import Path
 
 import yaml
+
+logger = logging.getLogger(__name__)  # initialize default logger
 
 
 def load_sources_config(config_path: Path | None = None) -> dict:
@@ -23,8 +26,10 @@ def load_sources_config(config_path: Path | None = None) -> dict:
     else:
         config_file = config_path
 
+    logger.info(f"Loading sources config from: {config_file}")
     with config_file.open("r", encoding="utf-8") as f:
         sources_config = yaml.safe_load(f)
+    logger.debug(f"Loaded sources config: {sources_config}")
 
     return sources_config
 
@@ -49,8 +54,10 @@ def load_runtime_config(config_path: Path | None = None) -> dict:
     else:
         config_file = Path(config_path)
 
+    logger.info(f"Loading runtime config from: {config_file}")
     with config_file.open("r", encoding="utf-8") as f:
         runtime_config = yaml.safe_load(f)
+    logger.debug(f"Loaded runtime config: {runtime_config}")
 
     return runtime_config
 
@@ -68,6 +75,9 @@ def resolve_runtime_config(runtime_config: dict) -> dict:
     """
     # get active environment (dev or prod)
     active_environment = runtime_config["active_environment"]
+    logger.info(
+        f"Resolving runtime configuration for environment: {active_environment}"
+    )
 
     # get default config
     defaults = runtime_config.get("defaults", {})
@@ -113,9 +123,12 @@ def resolve_runtime_config(runtime_config: dict) -> dict:
         }
     else:
         # TODO: update this when more storage types are supported
+        logger.error(f"Unsupported storage type detected: {target_storage_type}")
         raise NotImplementedError(
             f"Unsupported target_storage_type: {target_storage_type}. "
             "Currently only 'local' storage is implemented."
         )
+
+    logger.debug(f"Resolved runtime config: {resolved_config}")
 
     return resolved_config

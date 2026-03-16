@@ -1,10 +1,19 @@
 import json
+import logging
 import shutil
 import time
 from datetime import datetime, timezone
 from pathlib import Path
 
 import requests
+
+from nyc_taxi_data_service.config.config_loader import (
+    load_runtime_config,
+    resolve_runtime_config,
+)
+from nyc_taxi_data_service.utils.log_util import setup_logging
+
+logger = logging.getLogger(__name__)  # initialize default logger
 
 
 def load_manifest(manifest_path: Path | str) -> dict:
@@ -19,8 +28,12 @@ def load_manifest(manifest_path: Path | str) -> dict:
     """
     manifest_file = Path(manifest_path)
 
+    logger.info(f"Loading manifest from {manifest_file}")
     with manifest_file.open("r", encoding="utf-8") as f:
-        return json.load(f)
+        manifest = json.load(f)
+    logger.debug(f"Loaded manifest: {manifest}")
+
+    return manifest
 
 
 def resolve_target_path(
@@ -37,7 +50,10 @@ def resolve_target_path(
     Returns:
         Full target path where file should be downloaded
     """
-    return Path(target_base_path) / target_relative_path
+    full_target_path = Path(target_base_path) / target_relative_path
+    logger.debug(f"Resolved target path: {full_target_path}")
+
+    return full_target_path
 
 
 def get_remote_file_metadata(source_url: str, timeout: int = 30) -> dict:
@@ -51,20 +67,30 @@ def get_remote_file_metadata(source_url: str, timeout: int = 30) -> dict:
     Returns:
         A dictionary containing remote file metadata
     """
-    response = requests.head(source_url, allow_redirects=True, timeout=timeout)
+    logger.debug(f"Fetching remote metadata for {source_url}")
 
-    content_length_raw = response.headers.get("Content-Length")
-    content_length = int(content_length_raw) if content_length_raw else None
+    try:
+        response = requests.head(source_url, allow_redirects=True, timeout=timeout)
 
-    return {
-        "source_url": source_url,
-        "status_code": response.status_code,
-        "ok": response.ok,
-        "content_length": content_length,
-        "content_type": response.headers.get("Content-Type"),
-        "etag": response.headers.get("ETag"),
-        "last_modified": response.headers.get("Last-Modified"),
-    }
+        content_length_raw = response.headers.get("Content-Length")
+        content_length = int(content_length_raw) if content_length_raw else None
+
+        metadata = {
+            "source_url": source_url,
+            "status_code": response.status_code,
+            "ok": response.ok,
+            "content_length": content_length,
+            "content_type": response.headers.get("Content-Type"),
+            "etag": response.headers.get("ETag"),
+            "last_modified": response.headers.get("Last-Modified"),
+        }
+        logger.debug(f"Remote metadata fetched: {metadata}")
+
+        return metadata
+
+    except requests.RequestException as e:
+        logger.error(f"Failed to fetch metadata for {source_url}: {str(e)}")
+        raise
 
 
 # TODO: current version assumes manifest_entries and remote_metadata_list follow the same order
@@ -83,6 +109,11 @@ def attach_remote_metadata_to_entries(
     Returns:
         New list of manifest entries enriched with remote metadata
     """
+    logger.debug(
+        "Attaching %d remote metadata to %d manifest entries",
+        len(remote_metadata_list),
+        len(manifest_entries),
+    )
     enriched_entries = []
 
     for entry, metadata in zip(manifest_entries, remote_metadata_list, strict=False):
@@ -128,6 +159,12 @@ def get_total_required_bytes(remote_metadata_list: list[dict]) -> int:
         if content_length is not None:
             total_bytes += content_length
 
+    logger.info(
+        "Total download size: %s for %d files",
+        format_bytes(total_bytes),
+        len(remote_metadata_list),
+    )
+
     return total_bytes
 
 
@@ -152,6 +189,16 @@ def check_local_free_space(
     usage = shutil.disk_usage(target_path)
     free_bytes = usage.free
     enough_space = free_bytes >= required_bytes
+
+    if not enough_space:
+        logger.error(
+            "Insufficient disk space at %s. (Required: %s. Available: %s)",
+            target_path,
+            format_bytes(required_bytes),
+            format_bytes(free_bytes),
+        )
+    else:
+        logger.info(f"Disk space check passed: {format_bytes(free_bytes)} available")
 
     return {
         "target_base_path": str(target_path),
@@ -197,16 +244,20 @@ def download_file(
     """
     target_file = Path(target_path)
     temp_target_file = Path(str(target_file) + ".part")
-
     target_file.parent.mkdir(parents=True, exist_ok=True)
+    logger.debug(
+        "Preparing download: source_url=%s, target_path=%s, expected_size=%s, max_attempts=%d",
+        source_url,
+        target_file,
+        format_bytes(expected_size_bytes),
+        max_attempts,
+    )
 
     # skip download if file already exist and match the expected size
     if skip_existing and target_file.exists():
         existing_size = target_file.stat().st_size
         if expected_size_bytes is None or existing_size == expected_size_bytes:
-            print(
-                f"target file already exists with expected size, skip download {target_file}"
-            )
+            logger.info(f"File exists and size matches, skipping: {target_file}")
             return {
                 "source_url": source_url,
                 "target_path": str(target_file),
@@ -218,10 +269,11 @@ def download_file(
                 "error": None,
             }
 
-        print(
-            f"target file exists but size mismatch, re-downloading {target_file} "
-            f"(existing={format_bytes(existing_size)}, "
-            f"expected={format_bytes(expected_size_bytes)})"
+        logger.warning(
+            "Size mismatch for %s, redownloading (Local: %s, Remote: %s)",
+            target_file,
+            format_bytes(existing_size),
+            format_bytes(expected_size_bytes),
         )
 
     last_error = None
@@ -231,7 +283,7 @@ def download_file(
 
         # clean up stale .part file from previous failed run
         if temp_target_file.exists():
-            print(f"stale temp file found, removing {temp_target_file}")
+            logger.debug(f"Found stale temp file, removing {temp_target_file}")
             temp_target_file.unlink()
 
         try:
@@ -241,10 +293,12 @@ def download_file(
 
                 content_length_raw = response.headers.get("Content-Length")
                 content_length = int(content_length_raw) if content_length_raw else None
-                print(
-                    f"downloading {source_url} "
-                    f"(size: {format_bytes(content_length)}) "
-                    f"[attempt {attempt}/{max_attempts}]"
+                logger.info(
+                    "Downloading %s (size: %s) [Attempt %d/%d]",
+                    target_file,
+                    format_bytes(content_length),
+                    attempt,
+                    max_attempts,
                 )
 
                 with temp_target_file.open("wb") as f:
@@ -265,6 +319,9 @@ def download_file(
             # if download success, move temp file into final target path
             # and return success status
             temp_target_file.replace(target_file)
+            logger.info(
+                f"Download completed: {target_file} ({format_bytes(bytes_written)})"
+            )
             return {
                 "source_url": source_url,
                 "target_path": str(target_file),
@@ -284,6 +341,12 @@ def download_file(
 
             # if reached max_attempts, return failed status
             if attempt >= max_attempts:
+                logger.error(
+                    "Failed to download %s after %d attempts. Last error: %s",
+                    target_file,
+                    max_attempts,
+                    last_error,
+                )
                 return {
                     "source_url": source_url,
                     "target_path": str(target_file),
@@ -295,13 +358,22 @@ def download_file(
                 }
 
             # if max_attempts not reached, sleep & retry
-            print(
-                f"download failed (attempt {attempt}/{max_attempts}): {e}. "
-                f"Retrying in {retry_delay_seconds}s"
+            logger.warning(
+                "Download failed for %s [attempt %d/%d]: %s. Retrying in %d seconds.",
+                target_file,
+                attempt,
+                max_attempts,
+                last_error,
+                retry_delay_seconds,
             )
             time.sleep(retry_delay_seconds)
 
     # fallback return statement (usually will never be reached)
+    logger.error(
+        "Reached unexpected fallback return in download_file for %s. Last error: %s",
+        target_file,
+        last_error,
+    )
     return {
         "source_url": source_url,
         "target_path": str(target_file),
@@ -330,9 +402,11 @@ def download_manifest_entries(
     Returns:
         List of download result dictionaries
     """
+    logger.info(f"Starting download of {len(manifest_entries)} entries")
     download_results = []
 
-    for entry in manifest_entries:
+    for index, entry in enumerate(manifest_entries, start=1):
+        logger.debug(f"Processing manifest entry {index}/{len(manifest_entries)}")
         full_target_path = resolve_target_path(
             target_base_path=target_base_path,
             target_relative_path=entry["target_relative_path"],
@@ -382,6 +456,14 @@ def summarize_download_results(download_results: list[dict]) -> dict:
 
         summary["total_bytes_written"] += result.get("bytes_written", 0)
 
+    logger.info(
+        "Download summary: downloaded=%d, skipped=%d, failed=%d, total_bytes_written=%d",
+        summary["downloaded"],
+        summary["skipped"],
+        summary["failed"],
+        summary["total_bytes_written"],
+    )
+
     return summary
 
 
@@ -423,78 +505,60 @@ def write_download_log(
 
     with log_path.open("w", encoding="utf-8") as f:
         json.dump(payload, f, indent=2)
+    logger.info(f"Download log written to: {log_path}")
 
     return log_path
 
 
 def main() -> None:
+    # load config files
+    runtime_config = load_runtime_config()
+    resolved_runtime_config = resolve_runtime_config(runtime_config)
+
+    # set up logging based on config setting
+    log_level = resolved_runtime_config.get("logging", {}).get("level", "INFO")
+    setup_logging(level=log_level)
+    logger.info("NYC Taxi Data Downloader started")
+
+    # load manifest file
     manifest_path = Path("data/manifests/manifest.json")
-
-    print("=== loading manifest ===")
-    print("manifest_path:", manifest_path)
-
     manifest = load_manifest(manifest_path)
-
-    print("\n=== manifest metadata ===")
-    print("generated_at_utc:", manifest.get("generated_at_utc"))
-    print("active_environment:", manifest.get("active_environment"))
-    print("time_frame:", manifest.get("time_frame"))
-    print("vehicle_types:", manifest.get("vehicle_types"))
-    print("storage:", manifest.get("storage"))
-
-    manifest_entries = manifest.get("entries", [])
-
-    print("\n=== manifest summary ===")
-    print("total manifest entries:", len(manifest_entries))
-
-    target_base_path = manifest["storage"]["target_base_path"]
-
-    print("\n=== resolved target paths ===")
-    for entry in manifest_entries:
-        full_target_path = resolve_target_path(
-            target_base_path=target_base_path,
-            target_relative_path=entry["target_relative_path"],
-        )
-        print(
-            {
-                "vehicle_type": entry["vehicle_type"],
-                "year_month": entry["year_month"],
-                "source_url": entry["source_url"],
-                "full_target_path": str(full_target_path),
-            }
-        )
-
-    print("\n=== remote file metadata ===")
-    remote_metadata_list = []
-    for entry in manifest_entries:
-        metadata = get_remote_file_metadata(entry["source_url"])
-        remote_metadata_list.append(metadata)
-        print(
-            {
-                "vehicle_type": entry["vehicle_type"],
-                "year_month": entry["year_month"],
-                "status_code": metadata["status_code"],
-                "content_length": format_bytes(metadata["content_length"]),
-                "last_modified": metadata["last_modified"],
-            }
-        )
-
-    required_bytes = get_total_required_bytes(remote_metadata_list)
-
-    print("\n=== total required download size ===")
-    print("total required space:", format_bytes(required_bytes))
-
-    space_check = check_local_free_space(
-        target_base_path=target_base_path,
-        required_bytes=required_bytes,
+    logger.info(
+        "Manifest metadata: generated_at_utc=%s, active_environment=%s, time_frame=%s, vehicle_types=%s, storage=%s",
+        manifest.get("generated_at_utc"),
+        manifest.get("active_environment"),
+        manifest.get("time_frame"),
+        manifest.get("vehicle_types"),
+        manifest.get("storage"),
     )
 
-    print("\n=== local disk space check ===")
-    print("required_space:", format_bytes(space_check["required_bytes"]))
-    print("free_space:", format_bytes(space_check["free_bytes"]))
-    print("has enough space:", space_check["enough_space"])
+    # get remote file metadata and do space check (if on local)
+    manifest_entries = manifest.get("entries", [])
+    remote_metadata_list = [
+        get_remote_file_metadata(entry["source_url"]) for entry in manifest_entries
+    ]
+    required_bytes = get_total_required_bytes(remote_metadata_list)
 
-    print("\n=== downloading files from manifest ===")
+    target_storage_type = manifest["storage"]["target_storage_type"]
+    target_base_path = manifest["storage"]["target_base_path"]
+    if target_storage_type == "local":
+        space_check = check_local_free_space(
+            target_base_path=target_base_path,
+            required_bytes=required_bytes,
+        )
+        if not space_check["enough_space"]:
+            logger.critical(
+                "Aborting download due to insufficient disk space (required: %s. free space: %s)",
+                format_bytes(space_check["required_bytes"]),
+                format_bytes(space_check["free_bytes"]),
+            )
+            return
+    else:
+        logger.info(
+            f"Skipping local disk check for storage type: {target_storage_type}"
+        )
+
+    # execute download & summarize results
     manifest_entries_with_metadata = attach_remote_metadata_to_entries(
         manifest_entries=manifest_entries,
         remote_metadata_list=remote_metadata_list,
@@ -504,36 +568,16 @@ def main() -> None:
         target_base_path=target_base_path,
         skip_existing=True,
     )
-
-    print("\n=== download results ===")
-    for result in download_results:
-        print(
-            {
-                "vehicle_type": result["vehicle_type"],
-                "year_month": result["year_month"],
-                "status": result["status"],
-                "bytes_written": format_bytes(result["bytes_written"]),
-                "target_path": result["target_path"],
-                "error": result["error"],
-            }
-        )
-
     summary = summarize_download_results(download_results)
 
-    print("\n=== download summary ===")
-    print("downloaded:", summary["downloaded"])
-    print("skipped:", summary["skipped"])
-    print("failed:", summary["failed"])
-    print("total_bytes_written:", format_bytes(summary["total_bytes_written"]))
-
-    print("\n=== writing download log ===")
+    # save download log
     log_path = write_download_log(
         download_results=download_results,
         summary=summary,
         manifest_path=manifest_path,
         target_base_path=target_base_path,
     )
-    print("log written to:", log_path)
+    logger.info("Downloader completed successfully")
 
 
 if __name__ == "__main__":

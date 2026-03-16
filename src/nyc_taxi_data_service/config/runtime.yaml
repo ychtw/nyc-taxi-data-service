@@ -3,9 +3,14 @@ active_environment: dev
 defaults:
   manifest:
     output_path: data/manifests
+  logging:
+    level: INFO
 
 environments:
   dev:
+    logging:
+      level: DEBUG
+
     storage:
       target_storage_type: local
       # group settings by type

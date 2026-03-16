@@ -1,4 +1,5 @@
 import json
+import logging
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -7,6 +8,9 @@ from nyc_taxi_data_service.config.config_loader import (
     load_sources_config,
     resolve_runtime_config,
 )
+from nyc_taxi_data_service.utils.log_util import setup_logging
+
+logger = logging.getLogger(__name__)  # initialize default logger
 
 
 def generate_year_months(start_year_month: str, end_year_month: str) -> list[str]:
@@ -16,6 +20,10 @@ def generate_year_months(start_year_month: str, end_year_month: str) -> list[str
     Returns:
         A list of year-month (YYYY-MM)
     """
+    logger.info(
+        f"Generating year-month range from {start_year_month} to {end_year_month}"
+    )
+
     # validate start & end month
     start_dt = datetime.strptime(start_year_month, "%Y-%m")
     end_dt = datetime.strptime(end_year_month, "%Y-%m")
@@ -26,6 +34,7 @@ def generate_year_months(start_year_month: str, end_year_month: str) -> list[str
     end_month_num = end_dt.month
 
     if (start_year, start_month_num) > (end_year, end_month_num):
+        logger.error(f"Invalid time range: {start_year_month} > {end_year_month}")
         raise ValueError(
             f"start_year_month {start_year_month} cannot be later than end_year_month {end_year_month}"
         )
@@ -44,6 +53,8 @@ def generate_year_months(start_year_month: str, end_year_month: str) -> list[str
             current_month = 1
         else:
             current_month += 1
+
+    logger.debug(f"Generated year-months: {year_months}")
 
     return year_months
 
@@ -76,20 +87,37 @@ def build_manifest_entries(
     end_year_month = resolved_runtime_config["time_frame"]["end_year_month"]
     requested_vehicle_types = resolved_runtime_config["vehicle_types"]
 
+    logger.info(
+        "Building manifest for %s, from %s to %s",
+        requested_vehicle_types,
+        start_year_month,
+        end_year_month,
+    )
+
     # generate a list of year-month combination based on resolved config
     year_months = generate_year_months(start_year_month, end_year_month)
 
     # build manifest
     manifest_entries = []
     for vehicle_type in requested_vehicle_types:
+        vehicle_entry_count = 0  # for logging purpose
         vehicle_config = sources_config["vehicle_types"][vehicle_type]
         available_from = vehicle_config["available_from"]
         name_pattern = vehicle_config["name_pattern"]
 
+        logger.info(f"Processing '{vehicle_type}' (available_from={available_from})")
+
         for year_month in year_months:
             if year_month < available_from:
+                logger.debug(
+                    "Skipping '%s' for %s: data only available from %s",
+                    vehicle_type,
+                    year_month,
+                    available_from,
+                )
                 continue
 
+            # construct a manifest entry
             year, month = year_month.split("-")
             source_file_name = f"{name_pattern}_{year_month}.{file_extension}"
             source_url = f"{base_url}/{source_file_name}"
@@ -97,6 +125,7 @@ def build_manifest_entries(
                 f"{vehicle_type}/year={year}/month={month}/{source_file_name}"
             )
 
+            # append manifest entry to list
             manifest_entries.append(
                 {
                     "vehicle_type": vehicle_type,
@@ -106,6 +135,13 @@ def build_manifest_entries(
                     "target_relative_path": target_relative_path,
                 }
             )
+            vehicle_entry_count += 1
+
+        logger.debug(
+            f"Built {vehicle_entry_count} manifest entries for '{vehicle_type}'"
+        )
+
+    logger.debug(f"Finished building {len(manifest_entries)} manifest entries")
 
     return manifest_entries
 
@@ -142,6 +178,9 @@ def write_manifest(
 
     # create output file path
     manifest_file = output_dir / "manifest.json"
+    logger.info(
+        f"Writing manifest file to: {manifest_file}, with {len(manifest_entries)} entries"
+    )
 
     # form manifest content based on above info
     manifest_payload = {
@@ -152,6 +191,7 @@ def write_manifest(
         "storage": resolved_runtime_config.get("storage"),
         "entries": manifest_entries,
     }
+    logger.debug(f"Manifest payload: {manifest_payload}")
 
     # write manifest to target destination
     with manifest_file.open("w", encoding="utf-8") as f:
@@ -161,51 +201,33 @@ def write_manifest(
 
 
 def main() -> None:
-    # load config files
-    sources_config = load_sources_config()
-    runtime_config = load_runtime_config()
-    resolved_runtime_config = resolve_runtime_config(runtime_config)
+    try:
+        # load config files
+        sources_config = load_sources_config()
+        runtime_config = load_runtime_config()
+        resolved_runtime_config = resolve_runtime_config(runtime_config)
 
-    # build manifest based on configs
-    manifest_entries = build_manifest_entries(sources_config, resolved_runtime_config)
+        # set up logging based on config setting
+        log_level = resolved_runtime_config.get("logging", {}).get("level", "INFO")
+        setup_logging(level=log_level)
+        logger.info("Starting NYC taxi data service manifest builder")
 
-    print("=== full sources config ===")
-    print(sources_config)
-
-    print("\n=== full runtime config ===")
-    print(runtime_config)
-
-    print("\n=== resolved_runtime_config ===")
-    print(resolved_runtime_config)
-
-    print("\n=== generated year_months ===")
-    print(
-        generate_year_months(
-            start_year_month=resolved_runtime_config["time_frame"]["start_year_month"],
-            end_year_month=resolved_runtime_config["time_frame"]["end_year_month"],
+        # build manifest based on configs
+        manifest_entries = build_manifest_entries(
+            sources_config, resolved_runtime_config
         )
-    )
 
-    print("\n=== manifest entries ===")
-    for entry in manifest_entries:
-        print(entry)
+        # write manifest to disk
+        manifest_output_dir = resolved_runtime_config["manifest"]["output_path"]
+        manifest_path = write_manifest(
+            manifest_entries=manifest_entries,
+            resolved_runtime_config=resolved_runtime_config,
+            output_path=manifest_output_dir,
+        )
+        logger.info("Manifest builder completed successfully")
 
-    print("\n=== manifest summary ===")
-    print("total entries:", len(manifest_entries))
-
-    # write manifest to disk
-    manifest_output_dir = resolved_runtime_config["manifest"]["output_path"]
-
-    print("\n=== writing manifest ===")
-    print("output_dir:", manifest_output_dir)
-
-    manifest_path = write_manifest(
-        manifest_entries=manifest_entries,
-        resolved_runtime_config=resolved_runtime_config,
-        output_path=manifest_output_dir,
-    )
-
-    print("manifest written to:", manifest_path)
+    except Exception as e:
+        logger.error(f"Manifest generation failed: {str(e)}", exc_info=True)
 
 
 if __name__ == "__main__":
