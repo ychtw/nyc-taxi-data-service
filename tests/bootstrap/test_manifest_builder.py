@@ -42,6 +42,7 @@ from nyc_taxi_data_service.bootstrap.manifest_builder import (
             ],
         ),
     ],
+    ids=["standard_range", "single_month", "cross_year", "multi_year_span"],
 )
 def test_generate_year_months_scenarios(
     start: str, end: str, expected: list[str]
@@ -294,6 +295,13 @@ def test_build_manifest_entries_logic():
                 "source_file_names": [],
             },
         ),
+    ],
+    ids=[
+        "single_vehicle_single_month",
+        "single_vehicle_multiple_months",
+        "multiple_vehicle_types",
+        "skip_months_before_available_from",
+        "all_months_unavailable",
     ],
 )
 def test_build_manifest_entries_scenarios(
