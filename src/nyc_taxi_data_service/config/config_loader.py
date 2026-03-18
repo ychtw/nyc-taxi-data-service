@@ -36,15 +36,17 @@ def load_sources_config(config_path: Path | None = None) -> dict:
 
 def load_runtime_config(config_path: Path | None = None) -> dict:
     """
-    Load runtime config, which contains:
-    - active environment
-    - manifest output path
-    - storage config
-    - default request time frame
-    - default vehicle types
+    Load the runtime configuration YAML.
+
+    The runtime config includes:
+    - the active environment
+    - shared defaults
+    - per-environment settings such as logging, storage,
+      request time frame, vehicle types, and serving-related config
 
     Args:
-        config_path: A path to the runtime config yaml file. If None, use the default `config/runtime.yaml`
+        config_path: A path to the runtime config yaml file.
+            If None, use the default `config/runtime.yaml`
 
     Returns:
         A dictionary of the input yaml config regarding runtime settings
@@ -66,12 +68,21 @@ def resolve_runtime_config(runtime_config: dict) -> dict:
     """
     Resolve runtime config based on active_environment (dev / prod)
 
+    This function:
+    - selects the active environment from `environments`
+    - shallow-merges shared `defaults` with the active environment config
+    - normalizes storage settings into a flatter structure
+    - returns the resolved runtime settings used by the application,
+      including manifest, logging, storage, time_frame, vehicle_types,
+      and serving config
+
     Args:
-        runtime_config: a dictionary of the config regarding runtime settings
-                        (may contain both settings for dev and prod)
+        runtime_config: A dictionary of runtime settings loaded from YAML.
+            It may contain shared defaults and multiple environment sections.
 
     Returns:
-        A dictionary of the config regarding actual runtime settings to be used in the request
+        A dictionary of the resolved runtime settings for the active
+        environment.
     """
     # get active environment (dev or prod)
     active_environment = runtime_config["active_environment"]

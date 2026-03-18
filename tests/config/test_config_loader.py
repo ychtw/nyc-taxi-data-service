@@ -127,6 +127,8 @@ def test_load_runtime_config_default() -> None:
         assert "time_frame" in env_config
         assert "vehicle_types" in env_config
         assert "logging" in env_config
+        assert "serving" in env_config
+
         assert "level" in env_config["logging"]
         assert env_config["logging"]["level"] in allowed_log_levels
 
@@ -137,6 +139,10 @@ def test_load_runtime_config_default() -> None:
         target_storage_type = storage_config["target_storage_type"]
         assert f"{target_storage_type}_settings" in storage_config
         assert "target_base_path" in storage_config[f"{target_storage_type}_settings"]
+
+        serving_config = env_config["serving"]
+        assert "mimic_current_date" in serving_config
+        assert isinstance(serving_config["mimic_current_date"], str)
 
 
 def test_load_runtime_config_custom_path(tmp_path: Path) -> None:
@@ -161,6 +167,9 @@ def test_load_runtime_config_custom_path(tmp_path: Path) -> None:
                     "end_year_month": "2026-02",
                 },
                 "vehicle_types": ["yellow"],
+                "serving": {
+                    "mimic_current_date": "2026-01-15",
+                },
             }
         },
     }
@@ -182,6 +191,7 @@ def test_load_runtime_config_custom_path(tmp_path: Path) -> None:
     assert test_env["time_frame"]["start_year_month"] == "2026-01"
     assert test_env["time_frame"]["end_year_month"] == "2026-02"
     assert test_env["vehicle_types"] == ["yellow"]
+    assert test_env["serving"]["mimic_current_date"] == "2026-01-15"
 
 
 def test_load_runtime_config_raises_file_not_found_for_missing_custom_file(
@@ -253,6 +263,9 @@ def test_resolve_runtime_config_local_storage_happy_path() -> None:
                     "end_year_month": "2025-03",
                 },
                 "vehicle_types": ["yellow", "green"],
+                "serving": {
+                    "mimic_current_date": "2025-01-15",
+                },
             }
         },
     }
@@ -271,6 +284,9 @@ def test_resolve_runtime_config_local_storage_happy_path() -> None:
     assert resolved["time_frame"]["start_year_month"] == "2025-01"
     assert resolved["time_frame"]["end_year_month"] == "2025-03"
     assert resolved["vehicle_types"] == ["yellow", "green"]
+    assert resolved["serving"] == {
+        "mimic_current_date": "2025-01-15",
+    }
 
 
 def test_resolve_runtime_config_uses_active_environment_section() -> None:
@@ -294,6 +310,9 @@ def test_resolve_runtime_config_uses_active_environment_section() -> None:
                     "end_year_month": "2025-03",
                 },
                 "vehicle_types": ["yellow", "green"],
+                "serving": {
+                    "mimic_current_date": "2025-01-15",
+                },
             },
             "prod": {
                 "logging": {"level": "WARNING"},
@@ -306,6 +325,9 @@ def test_resolve_runtime_config_uses_active_environment_section() -> None:
                     "end_year_month": "2024-12",
                 },
                 "vehicle_types": ["fhv"],
+                "serving": {
+                    "mimic_current_date": "2024-12-15",
+                },
             },
         },
     }
@@ -323,6 +345,9 @@ def test_resolve_runtime_config_uses_active_environment_section() -> None:
     assert resolved["time_frame"]["start_year_month"] == "2024-01"
     assert resolved["time_frame"]["end_year_month"] == "2024-12"
     assert resolved["vehicle_types"] == ["fhv"]
+    assert resolved["serving"] == {
+        "mimic_current_date": "2024-12-15",
+    }
 
 
 def test_resolve_runtime_config_shallow_merge_behavior() -> None:
@@ -349,6 +374,9 @@ def test_resolve_runtime_config_shallow_merge_behavior() -> None:
                     "end_year_month": "2025-03",
                 },
                 "vehicle_types": ["yellow"],
+                "serving": {
+                    "mimic_current_date": "2025-01-15",
+                },
             }
         },
     }
@@ -361,6 +389,9 @@ def test_resolve_runtime_config_shallow_merge_behavior() -> None:
     #       the env logging dict replaces the defaults logging dict entirely
     assert resolved["logging"] == {"level": "DEBUG"}
     assert "format" not in resolved["logging"]
+    assert resolved["serving"] == {
+        "mimic_current_date": "2025-01-15",
+    }
 
 
 def test_resolve_runtime_config_raises_value_error_when_storage_type_missing() -> None:
@@ -376,6 +407,9 @@ def test_resolve_runtime_config_raises_value_error_when_storage_type_missing() -
                     "end_year_month": "2025-03",
                 },
                 "vehicle_types": ["yellow"],
+                "serving": {
+                    "mimic_current_date": "2025-01-15",
+                },
             }
         },
     }
@@ -401,6 +435,9 @@ def test_resolve_runtime_config_raises_value_error_when_local_settings_missing()
                     "end_year_month": "2025-03",
                 },
                 "vehicle_types": ["yellow"],
+                "serving": {
+                    "mimic_current_date": "2025-01-15",
+                },
             }
         },
     }
@@ -430,6 +467,9 @@ def test_resolve_runtime_config_raises_value_error_when_target_base_path_missing
                     "end_year_month": "2025-03",
                 },
                 "vehicle_types": ["yellow"],
+                "serving": {
+                    "mimic_current_date": "2025-01-15",
+                },
             }
         },
     }
@@ -462,6 +502,9 @@ def test_resolve_runtime_config_raises_not_implemented_for_unsupported_storage_t
                     "end_year_month": "2025-03",
                 },
                 "vehicle_types": ["yellow"],
+                "serving": {
+                    "mimic_current_date": "2025-01-15",
+                },
             }
         },
     }

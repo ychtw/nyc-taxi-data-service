@@ -27,3 +27,6 @@ environments:
       - green
       # - fhv
       # - fhvhv
+
+    serving:
+      mimic_current_date: "2025-01-15"
