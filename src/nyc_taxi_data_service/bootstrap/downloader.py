@@ -155,8 +155,9 @@ def get_total_required_bytes(remote_metadata_list: list[dict]) -> int:
     total_bytes = 0
 
     for metadata in remote_metadata_list:
+        response_ok = metadata.get("ok")
         content_length = metadata.get("content_length")
-        if content_length is not None:
+        if response_ok and content_length is not None:
             total_bytes += content_length
 
     logger.info(
