@@ -179,13 +179,13 @@ def test_attach_remote_metadata_to_entries_returns_new_entry_dicts():
     assert result[0]["remote_metadata"] == remote_metadata_list[0]
 
 
-def test_attach_remote_metadata_to_entries_truncates_to_shorter_input_list():
+def test_attach_remote_metadata_to_entries_raises_when_lengths_differ():
     """
-    Verify that the function only returns pairs that can be formed from both
-    input lists.
+    Verify that the function raises ValueError when the number of manifest
+    entries and remote metadata items do not match.
 
-    Because the implementation uses zip(..., strict=False), iteration stops at
-    the shorter list length rather than raising an error.
+    Because the implementation uses zip(..., strict=True), mismatched lengths
+    should be treated as a programming error rather than silently truncating.
     """
     manifest_entries = [
         {
@@ -204,14 +204,11 @@ def test_attach_remote_metadata_to_entries_truncates_to_shorter_input_list():
         }
     ]
 
-    result = attach_remote_metadata_to_entries(
-        manifest_entries=manifest_entries,
-        remote_metadata_list=remote_metadata_list,
-    )
-
-    assert len(result) == 1
-    assert result[0]["source_url"] == manifest_entries[0]["source_url"]
-    assert result[0]["remote_metadata"] == remote_metadata_list[0]
+    with pytest.raises(ValueError):
+        attach_remote_metadata_to_entries(
+            manifest_entries=manifest_entries,
+            remote_metadata_list=remote_metadata_list,
+        )
 
 
 @pytest.mark.parametrize(

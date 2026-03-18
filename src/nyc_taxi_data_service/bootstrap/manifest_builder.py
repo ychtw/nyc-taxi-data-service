@@ -200,34 +200,36 @@ def write_manifest(
     return manifest_file
 
 
+def run(sources_config: dict, resolved_runtime_config: dict) -> Path:
+    logger.info("Starting NYC taxi data service manifest builder")
+
+    # build manifest based on configs
+    manifest_entries = build_manifest_entries(sources_config, resolved_runtime_config)
+
+    # write manifest to disk
+    manifest_output_dir = resolved_runtime_config["manifest"]["output_path"]
+    manifest_path = write_manifest(
+        manifest_entries=manifest_entries,
+        resolved_runtime_config=resolved_runtime_config,
+        output_path=manifest_output_dir,
+    )
+    logger.info("Manifest builder completed successfully")
+
+    return manifest_path
+
+
 def main() -> None:
-    try:
-        # load config files
-        sources_config = load_sources_config()
-        runtime_config = load_runtime_config()
-        resolved_runtime_config = resolve_runtime_config(runtime_config)
+    # load config files
+    sources_config = load_sources_config()
+    runtime_config = load_runtime_config()
+    resolved_runtime_config = resolve_runtime_config(runtime_config)
 
-        # set up logging based on config setting
-        log_level = resolved_runtime_config.get("logging", {}).get("level", "INFO")
-        setup_logging(level=log_level)
-        logger.info("Starting NYC taxi data service manifest builder")
+    # set up logging based on runtime config setting
+    log_level = resolved_runtime_config.get("logging", {}).get("level", "INFO")
+    setup_logging(level=log_level)
 
-        # build manifest based on configs
-        manifest_entries = build_manifest_entries(
-            sources_config, resolved_runtime_config
-        )
-
-        # write manifest to disk
-        manifest_output_dir = resolved_runtime_config["manifest"]["output_path"]
-        manifest_path = write_manifest(
-            manifest_entries=manifest_entries,
-            resolved_runtime_config=resolved_runtime_config,
-            output_path=manifest_output_dir,
-        )
-        logger.info("Manifest builder completed successfully")
-
-    except Exception as e:
-        logger.error(f"Manifest generation failed: {str(e)}", exc_info=True)
+    # run manifest builder
+    run(sources_config, resolved_runtime_config)
 
 
 if __name__ == "__main__":

@@ -116,7 +116,7 @@ def attach_remote_metadata_to_entries(
     )
     enriched_entries = []
 
-    for entry, metadata in zip(manifest_entries, remote_metadata_list, strict=False):
+    for entry, metadata in zip(manifest_entries, remote_metadata_list, strict=True):
         enriched_entry = dict(entry)
         enriched_entry["remote_metadata"] = metadata
         enriched_entries.append(enriched_entry)
@@ -360,7 +360,7 @@ def download_file(
 
             # if max_attempts not reached, sleep & retry
             logger.warning(
-                "Download failed for %s [attempt %d/%d]: %s. Retrying in %d seconds.",
+                "Download failed for %s [attempt %d/%d]: %s. Retrying in %.1f seconds.",
                 target_file,
                 attempt,
                 max_attempts,
@@ -511,18 +511,10 @@ def write_download_log(
     return log_path
 
 
-def main() -> None:
-    # load config files
-    runtime_config = load_runtime_config()
-    resolved_runtime_config = resolve_runtime_config(runtime_config)
-
-    # set up logging based on config setting
-    log_level = resolved_runtime_config.get("logging", {}).get("level", "INFO")
-    setup_logging(level=log_level)
+def run(manifest_path: Path | str) -> Path:
     logger.info("NYC Taxi Data Downloader started")
 
     # load manifest file
-    manifest_path = Path("data/manifests/manifest.json")
     manifest = load_manifest(manifest_path)
     logger.info(
         "Manifest metadata: generated_at_utc=%s, active_environment=%s, time_frame=%s, vehicle_types=%s, storage=%s",
@@ -553,7 +545,9 @@ def main() -> None:
                 format_bytes(space_check["required_bytes"]),
                 format_bytes(space_check["free_bytes"]),
             )
-            return
+            raise RuntimeError(
+                f"Insufficient disk space: required={format_bytes(space_check['required_bytes'])}, free={format_bytes(space_check['free_bytes'])}",
+            )
     else:
         logger.info(
             f"Skipping local disk check for storage type: {target_storage_type}"
@@ -579,6 +573,22 @@ def main() -> None:
         target_base_path=target_base_path,
     )
     logger.info("Downloader completed successfully")
+
+    return log_path
+
+
+def main() -> None:
+    # load & resolve runtime config file
+    runtime_config = load_runtime_config()
+    resolved_runtime_config = resolve_runtime_config(runtime_config)
+
+    # set up logging based on runtime config setting
+    log_level = resolved_runtime_config.get("logging", {}).get("level", "INFO")
+    setup_logging(level=log_level)
+
+    # run downloader
+    manifest_path = Path("data/manifests/manifest.json")
+    run(manifest_path)
 
 
 if __name__ == "__main__":
