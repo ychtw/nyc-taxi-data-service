@@ -1,4 +1,5 @@
 import logging
+from copy import deepcopy
 from importlib.resources import files
 from pathlib import Path
 
@@ -36,15 +37,17 @@ def load_sources_config(config_path: Path | None = None) -> dict:
 
 def load_runtime_config(config_path: Path | None = None) -> dict:
     """
-    Load runtime config, which contains:
-    - active environment
-    - manifest output path
-    - storage config
-    - default request time frame
-    - default vehicle types
+    Load the runtime configuration YAML.
+
+    The runtime config includes:
+    - the active environment
+    - shared defaults
+    - per-environment settings such as logging, storage,
+      request time frame, vehicle types, and serving-related config
 
     Args:
-        config_path: A path to the runtime config yaml file. If None, use the default `config/runtime.yaml`
+        config_path: A path to the runtime config yaml file.
+            If None, use the default `config/runtime.yaml`
 
     Returns:
         A dictionary of the input yaml config regarding runtime settings
@@ -62,16 +65,53 @@ def load_runtime_config(config_path: Path | None = None) -> dict:
     return runtime_config
 
 
+def _deep_merge_dicts(base: dict, override: dict) -> dict:
+    """
+    Recursively merge two dictionaries.
+
+    Rules:
+    - if both values are dicts, merge them recursively
+    - otherwise, the override value replaces the base value
+
+    Args:
+        base: The default/base dictionary.
+        override: The dictionary whose values should override base.
+
+    Returns:
+        A new merged dictionary.
+    """
+    merged = deepcopy(base)
+
+    for key, override_value in override.items():
+        base_value = merged.get(key)
+
+        if isinstance(base_value, dict) and isinstance(override_value, dict):
+            merged[key] = _deep_merge_dicts(base_value, override_value)
+        else:
+            merged[key] = deepcopy(override_value)
+
+    return merged
+
+
 def resolve_runtime_config(runtime_config: dict) -> dict:
     """
     Resolve runtime config based on active_environment (dev / prod)
 
+    This function:
+    - selects the active environment from `environments`
+    - shallow-merges shared `defaults` with the active environment config
+    - normalizes storage settings into a flatter structure
+    - returns the resolved runtime settings used by the application,
+      including manifest, logging, storage, time_frame, vehicle_types,
+      and serving config
+
     Args:
-        runtime_config: a dictionary of the config regarding runtime settings
-                        (may contain both settings for dev and prod)
+        runtime_config: A dictionary of runtime settings loaded from YAML.
+            It may contain shared defaults and multiple environment sections.
 
     Returns:
-        A dictionary of the config regarding actual runtime settings to be used in the request
+        A dictionary of the resolved runtime settings for the active
+        environment.
     """
     # get active environment (dev or prod)
     active_environment = runtime_config["active_environment"]
@@ -85,13 +125,9 @@ def resolve_runtime_config(runtime_config: dict) -> dict:
     # get config for the active environment
     env_config = runtime_config["environments"][active_environment]
 
-    # update default based on settings of the active environment
-    # TODO: update to use deep merge
-    resolved_config = dict(defaults)
-    resolved_config.update(env_config)
-    resolved_config["active_environment"] = (
-        active_environment  # record the active environment in result
-    )
+    # deep merge defaults with active environment config
+    resolved_config = _deep_merge_dicts(defaults, env_config)
+    resolved_config["active_environment"] = active_environment
 
     # storage normalization & validation
     storage_config = resolved_config.get("storage", {})
