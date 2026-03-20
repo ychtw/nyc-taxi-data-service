@@ -1,4 +1,5 @@
 import logging
+from copy import deepcopy
 from importlib.resources import files
 from pathlib import Path
 
@@ -64,6 +65,34 @@ def load_runtime_config(config_path: Path | None = None) -> dict:
     return runtime_config
 
 
+def _deep_merge_dicts(base: dict, override: dict) -> dict:
+    """
+    Recursively merge two dictionaries.
+
+    Rules:
+    - if both values are dicts, merge them recursively
+    - otherwise, the override value replaces the base value
+
+    Args:
+        base: The default/base dictionary.
+        override: The dictionary whose values should override base.
+
+    Returns:
+        A new merged dictionary.
+    """
+    merged = deepcopy(base)
+
+    for key, override_value in override.items():
+        base_value = merged.get(key)
+
+        if isinstance(base_value, dict) and isinstance(override_value, dict):
+            merged[key] = _deep_merge_dicts(base_value, override_value)
+        else:
+            merged[key] = deepcopy(override_value)
+
+    return merged
+
+
 def resolve_runtime_config(runtime_config: dict) -> dict:
     """
     Resolve runtime config based on active_environment (dev / prod)
@@ -96,13 +125,9 @@ def resolve_runtime_config(runtime_config: dict) -> dict:
     # get config for the active environment
     env_config = runtime_config["environments"][active_environment]
 
-    # update default based on settings of the active environment
-    # TODO: update to use deep merge
-    resolved_config = dict(defaults)
-    resolved_config.update(env_config)
-    resolved_config["active_environment"] = (
-        active_environment  # record the active environment in result
-    )
+    # deep merge defaults with active environment config
+    resolved_config = _deep_merge_dicts(defaults, env_config)
+    resolved_config["active_environment"] = active_environment
 
     # storage normalization & validation
     storage_config = resolved_config.get("storage", {})

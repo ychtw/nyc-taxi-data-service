@@ -117,12 +117,22 @@ def test_load_runtime_config_default() -> None:
     assert "level" in config["defaults"]["logging"]
     assert config["defaults"]["logging"]["level"] in allowed_log_levels
 
+    assert "serving" in config["defaults"]
+    serving_defaults = config["defaults"]["serving"]
+    assert "service_event_time_column_by_vehicle_type" in serving_defaults
+    event_time_mapping = serving_defaults["service_event_time_column_by_vehicle_type"]
+    assert "yellow" in event_time_mapping
+    assert "green" in event_time_mapping
+    assert "fhv" in event_time_mapping
+    assert "fhvhv" in event_time_mapping
+    assert all(isinstance(value, str) for value in event_time_mapping.values())
+
     # assert there's corresponding section in `environments` for the active environment
     active_env = config["active_environment"]
     assert active_env in config["environments"]
 
     # assert essential settings exist for every environment section
-    for env_name, env_config in config["environments"].items():
+    for env_config in config["environments"].values():
         assert "storage" in env_config
         assert "time_frame" in env_config
         assert "vehicle_types" in env_config
@@ -154,6 +164,11 @@ def test_load_runtime_config_custom_path(tmp_path: Path) -> None:
         "defaults": {
             "manifest": {"output_path": "tmp/manifests"},
             "logging": {"level": "WARNING"},
+            "serving": {
+                "service_event_time_column_by_vehicle_type": {
+                    "yellow": "tpep_dropoff_datetime",
+                }
+            },
         },
         "environments": {
             "test": {
@@ -242,6 +257,24 @@ def test_load_runtime_config_raises_yaml_error_for_invalid_yaml(
         load_runtime_config(bad_file)
 
 
+def test_load_runtime_config_default_active_env_vehicle_types_have_event_time_mapping() -> (
+    None
+):
+    """Ensure each active-environment vehicle type has a service event time mapping."""
+    config = load_runtime_config()
+
+    active_env = config["active_environment"]
+    active_env_config = config["environments"][active_env]
+
+    vehicle_types = active_env_config["vehicle_types"]
+    event_time_mapping = config["defaults"]["serving"][
+        "service_event_time_column_by_vehicle_type"
+    ]
+
+    for vehicle_type in vehicle_types:
+        assert vehicle_type in event_time_mapping
+
+
 def test_resolve_runtime_config_local_storage_happy_path() -> None:
     """Resolve active environment config and normalize local storage settings."""
     # define mock runtime config
@@ -250,6 +283,14 @@ def test_resolve_runtime_config_local_storage_happy_path() -> None:
         "defaults": {
             "manifest": {"output_path": "data/manifests"},
             "logging": {"level": "INFO"},
+            "serving": {
+                "service_event_time_column_by_vehicle_type": {
+                    "yellow": "tpep_dropoff_datetime",
+                    "green": "lpep_dropoff_datetime",
+                    "fhv": "dropOff_datetime",
+                    "fhvhv": "dropoff_datetime",
+                }
+            },
         },
         "environments": {
             "dev": {
@@ -285,6 +326,12 @@ def test_resolve_runtime_config_local_storage_happy_path() -> None:
     assert resolved["time_frame"]["end_year_month"] == "2025-03"
     assert resolved["vehicle_types"] == ["yellow", "green"]
     assert resolved["serving"] == {
+        "service_event_time_column_by_vehicle_type": {
+            "yellow": "tpep_dropoff_datetime",
+            "green": "lpep_dropoff_datetime",
+            "fhv": "dropOff_datetime",
+            "fhvhv": "dropoff_datetime",
+        },
         "mimic_current_date": "2025-01-15",
     }
 
@@ -297,6 +344,12 @@ def test_resolve_runtime_config_uses_active_environment_section() -> None:
         "defaults": {
             "manifest": {"output_path": "data/manifests"},
             "logging": {"level": "INFO"},
+            "serving": {
+                "service_event_time_column_by_vehicle_type": {
+                    "yellow": "tpep_dropoff_datetime",
+                    "green": "lpep_dropoff_datetime",
+                }
+            },
         },
         "environments": {
             "dev": {
@@ -346,12 +399,16 @@ def test_resolve_runtime_config_uses_active_environment_section() -> None:
     assert resolved["time_frame"]["end_year_month"] == "2024-12"
     assert resolved["vehicle_types"] == ["fhv"]
     assert resolved["serving"] == {
+        "service_event_time_column_by_vehicle_type": {
+            "yellow": "tpep_dropoff_datetime",
+            "green": "lpep_dropoff_datetime",
+        },
         "mimic_current_date": "2024-12-15",
     }
 
 
-def test_resolve_runtime_config_shallow_merge_behavior() -> None:
-    """Use a shallow merge, so nested dicts from env_config replace defaults entirely."""
+def test_resolve_runtime_config_deep_merge_behavior() -> None:
+    """Use a deep merge, so nested dicts are combined instead of replaced."""
     # define mock runtime config
     runtime_config = {
         "active_environment": "dev",
@@ -361,6 +418,14 @@ def test_resolve_runtime_config_shallow_merge_behavior() -> None:
                 "format": "plain_text",
             },
             "manifest": {"output_path": "data/manifests"},
+            "serving": {
+                "service_event_time_column_by_vehicle_type": {
+                    "yellow": "tpep_dropoff_datetime",
+                    "green": "lpep_dropoff_datetime",
+                    "fhv": "dropOff_datetime",
+                    "fhvhv": "dropoff_datetime",
+                }
+            },
         },
         "environments": {
             "dev": {
@@ -385,11 +450,17 @@ def test_resolve_runtime_config_shallow_merge_behavior() -> None:
     resolved = resolve_runtime_config(runtime_config)
 
     # assert resolved values
-    # note: because current implementation does shallow merge,
-    #       the env logging dict replaces the defaults logging dict entirely
-    assert resolved["logging"] == {"level": "DEBUG"}
-    assert "format" not in resolved["logging"]
+    assert resolved["logging"] == {
+        "level": "DEBUG",
+        "format": "plain_text",
+    }
     assert resolved["serving"] == {
+        "service_event_time_column_by_vehicle_type": {
+            "yellow": "tpep_dropoff_datetime",
+            "green": "lpep_dropoff_datetime",
+            "fhv": "dropOff_datetime",
+            "fhvhv": "dropoff_datetime",
+        },
         "mimic_current_date": "2025-01-15",
     }
 
