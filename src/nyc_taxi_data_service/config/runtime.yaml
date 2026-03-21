@@ -8,15 +8,12 @@ defaults:
     level: INFO
   
   serving:
-    # Mapping from vehicle type to the timestamp column used as the event time
-    # for the data service.
-    #
-    # The mimic current datetime defines the boundary between historic data
-    # and real-time data:
-    #   event_time <  mimic current datetime -> historic data (API)
-    #   event_time >= mimic current datetime -> real-time data (streaming)
-    #
-    # Each vehicle type uses a different timestamp column due to schema differences.
+    # `service_event_time_column_by_vehicle_type`: mapping from vehicle type 
+    #   to the event-time column used by the data service.
+    # - event time is compared with the mimic current datetime:
+    #   - event_time <  mimic time -> historic (API)
+    #   - event_time >= mimic time -> streaming
+    # - different vehicle types use different columns due to schema differences
     service_event_time_column_by_vehicle_type:
       yellow: "tpep_dropoff_datetime"
       green: "lpep_dropoff_datetime"
