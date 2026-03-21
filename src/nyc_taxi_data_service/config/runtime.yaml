@@ -22,7 +22,20 @@ defaults:
       green: "lpep_dropoff_datetime"
       fhv: "dropOff_datetime"
       fhvhv: "dropoff_datetime"
-
+    streaming:
+        # `buffer`: settings that control how data is staged from Parquet
+        # to DuckDB before downstream replay/publishing into Kafka topics
+        buffer:
+          # `window_size`: time span covered by each buffer-fill query
+          # - format: "<integer><unit>" (no spaces)
+          # - allowed units: m=minutes, h=hours, d=days
+          # - valid range: 1m to 1d
+          # - seconds and float values are not supported
+          window_size: "30m"
+          # DuckDB staging database location
+          db_base_path: "data/stream_buffer"
+          # table name inside the DuckDB buffer database
+          db_table_name: "buffered_data"
 
 environments:
   dev:

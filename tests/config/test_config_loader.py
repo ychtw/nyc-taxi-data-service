@@ -127,6 +127,13 @@ def test_load_runtime_config_default() -> None:
     assert "fhvhv" in event_time_mapping
     assert all(isinstance(value, str) for value in event_time_mapping.values())
 
+    assert "streaming" in serving_defaults
+    assert "buffer" in serving_defaults["streaming"]
+    buffer_config = serving_defaults["streaming"]["buffer"]
+    assert isinstance(buffer_config["window_size"], str)
+    assert isinstance(buffer_config["db_base_path"], str)
+    assert isinstance(buffer_config["db_table_name"], str)
+
     # assert there's corresponding section in `environments` for the active environment
     active_env = config["active_environment"]
     assert active_env in config["environments"]
@@ -167,7 +174,14 @@ def test_load_runtime_config_custom_path(tmp_path: Path) -> None:
             "serving": {
                 "service_event_time_column_by_vehicle_type": {
                     "yellow": "tpep_dropoff_datetime",
-                }
+                },
+                "streaming": {
+                    "buffer": {
+                        "window_size": "45m",
+                        "db_base_path": "tmp/stream_buffer",
+                        "db_table_name": "buffered_data",
+                    },
+                },
             },
         },
         "environments": {
@@ -198,6 +212,15 @@ def test_load_runtime_config_custom_path(tmp_path: Path) -> None:
     assert config["active_environment"] == "test"
     assert config["defaults"]["manifest"]["output_path"] == "tmp/manifests"
     assert config["defaults"]["logging"]["level"] == "WARNING"
+    assert config["defaults"]["serving"]["streaming"]["buffer"]["window_size"] == "45m"
+    assert (
+        config["defaults"]["serving"]["streaming"]["buffer"]["db_base_path"]
+        == "tmp/stream_buffer"
+    )
+    assert (
+        config["defaults"]["serving"]["streaming"]["buffer"]["db_table_name"]
+        == "buffered_data"
+    )
 
     test_env = config["environments"]["test"]
     assert test_env["logging"]["level"] == "DEBUG"
@@ -289,7 +312,14 @@ def test_resolve_runtime_config_local_storage_happy_path() -> None:
                     "green": "lpep_dropoff_datetime",
                     "fhv": "dropOff_datetime",
                     "fhvhv": "dropoff_datetime",
-                }
+                },
+                "streaming": {
+                    "buffer": {
+                        "window_size": "30m",
+                        "db_base_path": "data/stream_buffer",
+                        "db_table_name": "buffered_data",
+                    },
+                },
             },
         },
         "environments": {
@@ -332,6 +362,13 @@ def test_resolve_runtime_config_local_storage_happy_path() -> None:
             "fhv": "dropOff_datetime",
             "fhvhv": "dropoff_datetime",
         },
+        "streaming": {
+            "buffer": {
+                "window_size": "30m",
+                "db_base_path": "data/stream_buffer",
+                "db_table_name": "buffered_data",
+            },
+        },
         "mimic_current_date": "2025-01-15",
     }
 
@@ -348,7 +385,14 @@ def test_resolve_runtime_config_uses_active_environment_section() -> None:
                 "service_event_time_column_by_vehicle_type": {
                     "yellow": "tpep_dropoff_datetime",
                     "green": "lpep_dropoff_datetime",
-                }
+                },
+                "streaming": {
+                    "buffer": {
+                        "window_size": "30m",
+                        "db_base_path": "data/stream_buffer",
+                        "db_table_name": "buffered_data",
+                    },
+                },
             },
         },
         "environments": {
@@ -403,6 +447,13 @@ def test_resolve_runtime_config_uses_active_environment_section() -> None:
             "yellow": "tpep_dropoff_datetime",
             "green": "lpep_dropoff_datetime",
         },
+        "streaming": {
+            "buffer": {
+                "window_size": "30m",
+                "db_base_path": "data/stream_buffer",
+                "db_table_name": "buffered_data",
+            },
+        },
         "mimic_current_date": "2024-12-15",
     }
 
@@ -424,7 +475,14 @@ def test_resolve_runtime_config_deep_merge_behavior() -> None:
                     "green": "lpep_dropoff_datetime",
                     "fhv": "dropOff_datetime",
                     "fhvhv": "dropoff_datetime",
-                }
+                },
+                "streaming": {
+                    "buffer": {
+                        "window_size": "15m",
+                        "db_base_path": "data/stream_buffer",
+                        "db_table_name": "buffered_data",
+                    },
+                },
             },
         },
         "environments": {
@@ -460,6 +518,13 @@ def test_resolve_runtime_config_deep_merge_behavior() -> None:
             "green": "lpep_dropoff_datetime",
             "fhv": "dropOff_datetime",
             "fhvhv": "dropoff_datetime",
+        },
+        "streaming": {
+            "buffer": {
+                "window_size": "15m",
+                "db_base_path": "data/stream_buffer",
+                "db_table_name": "buffered_data",
+            },
         },
         "mimic_current_date": "2025-01-15",
     }
