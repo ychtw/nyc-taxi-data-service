@@ -37,6 +37,28 @@ defaults:
           # table name inside the DuckDB buffer database
           db_table_name: "buffered_data"
 
+        kafka:
+          # client connection settings (bootstrap, security, etc.)
+          client:
+            bootstrap_servers: "localhost:9092"
+            client_id: "nyc-taxi-data-service"
+            # security_protocol: "PLAINTEXT" (add if moving to EC2/SSL later)
+
+          # topic metadata and infrastructure defaults
+          topic:
+            prefix: "nyc_taxi"
+            num_partitions: 3
+            replication_factor: 1 # set to 1 for local testing
+            retention_ms: 86400000 # 24 hours
+
+          # producer behavior settings
+          producer:
+            acks: "all"
+            linger_ms: 0
+            batch_size: 65536
+            compression_type: "snappy"
+
+
 environments:
   dev:
     logging:
