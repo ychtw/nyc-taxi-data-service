@@ -52,3 +52,12 @@ def kafka_producer_module() -> types.ModuleType:
     import nyc_taxi_data_service.serving.streaming.kafka_producer as module
 
     return module
+
+
+@pytest.fixture
+def dummy_admin_config() -> dict:
+    """Return a representative admin client config for Kafka admin tests."""
+    return {
+        "bootstrap.servers": "localhost:9092",
+        "client.id": "nyc-taxi-data-service",
+    }
