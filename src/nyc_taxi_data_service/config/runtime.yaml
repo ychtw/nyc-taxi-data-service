@@ -58,6 +58,13 @@ defaults:
             batch_size: 65536
             compression_type: "snappy"
 
+          # `publish_interval`: how often buffered records are replayed to Kafka
+          # - format: "<integer><unit>" (no spaces)
+          # - allowed units: s=seconds, m=minutes, h=hours
+          # - must be >= 1s
+          # - must be <= streaming.buffer.window_size
+          # - smaller values make the stream feel more real-time
+          publish_interval: "5s"
 
 environments:
   dev:
