@@ -10,14 +10,14 @@ import duckdb
 logger = logging.getLogger(__name__)
 
 
-def _parse_window_size(window_size: str) -> timedelta:
+def _parse_buffer_duration(raw_value: str, field_name: str) -> timedelta:
     """
-    Parse and validate a streaming window-size string into a timedelta.
+    Parse and validate a streaming buffer duration string into a timedelta.
 
-    The runtime config stores the streaming window size as a compact duration
-    string such as "10m", "2h", or "1d". This helper validates the
-    format, converts the value to a timedelta, and enforces project-level
-    bounds for acceptable streaming query windows.
+    The runtime config stores streaming buffer durations such as `window_size`
+    and `retention` as compact strings like "10m", "2h", or "1d". This helper
+    validates the format, converts the value to a timedelta, and enforces the
+    shared duration bounds used by the streaming buffer config.
 
     Supported format:
     - one or more digits, followed immediately by a unit
@@ -41,30 +41,32 @@ def _parse_window_size(window_size: str) -> timedelta:
     - "2D"
 
     Validation rules:
-    - window_size must be a string in the supported compact format
+    - `raw_value` must be a string in the supported compact format
     - seconds are forbidden because windows shorter than 1 minute are too small
       for this project and would likely lead to excessive query frequency
     - the effective duration must be at least 1 minute
     - the effective duration must be no more than 1 day
 
     Args:
-        window_size: Streaming window-size string from runtime config, such as
+        raw_value: Raw duration string from runtime config, such as
             "30m", "2h", or "1d".
+        field_name: Config field name used in validation error messages,
+            such as "window_size" or "retention".
 
     Returns:
-        A timedelta representing the validated window size.
+        A validated timedelta for the requested buffer duration field.
 
     Raises:
         ValueError:
-            - if window_size is not a string
+            - if `raw_value` is not a string
             - if the format is invalid
             - if the unit is unsupported
             - if the parsed duration is shorter than 1 minute
             - if the parsed duration is longer than 1 day
     """
-    if not isinstance(window_size, str):
+    if not isinstance(raw_value, str):
         raise ValueError(
-            f"window_size must be a string, got {type(window_size).__name__}"
+            f"{field_name} must be a string, got {type(raw_value).__name__}"
         )
 
     # require a compact "<integer><unit>" format with no spaces
@@ -73,10 +75,10 @@ def _parse_window_size(window_size: str) -> timedelta:
     #   "2h"  -> valid
     #   "1d"  -> valid
     #   "30 s", "1hour", "m30" -> invalid
-    match = re.fullmatch(r"(\d+)([mhd])", window_size)
+    match = re.fullmatch(r"(\d+)([mhd])", raw_value)
     if match is None:
         raise ValueError(
-            "Invalid window_size format. Expected a compact duration like "
+            f"Invalid {field_name} format. Expected a compact duration like "
             "'1m', '30m', '2h', or '1d'. "
             "Allowed units are: m (minutes), h (hours), d (days)."
         )
@@ -92,18 +94,18 @@ def _parse_window_size(window_size: str) -> timedelta:
     else:  # unit == "d"
         duration = timedelta(days=value)
 
-    min_window = timedelta(minutes=1)
-    max_window = timedelta(days=1)
+    min_duration = timedelta(minutes=1)
+    max_duration = timedelta(days=1)
 
     # enforce project-level window bounds
-    if duration < min_window:
+    if duration < min_duration:
         raise ValueError(
-            f"window_size '{window_size}' is too short. Minimum allowed value is 1m."
+            f"{field_name} '{raw_value}' is too short. Minimum allowed value is 1m."
         )
 
-    if duration > max_window:
+    if duration > max_duration:
         raise ValueError(
-            f"window_size '{window_size}' is too long. Maximum allowed value is 1d."
+            f"{field_name} '{raw_value}' is too long. Maximum allowed value is 1d."
         )
 
     return duration
@@ -146,9 +148,17 @@ class StreamingWindowBuffer:
                 from the same service-time boundary.
         """
         # general settings
-        self.window_size = _parse_window_size(
-            resolved_runtime_config["serving"]["streaming"]["buffer"]["window_size"]
+        buffer_cfg = resolved_runtime_config["serving"]["streaming"]["buffer"]
+        self.window_size = _parse_buffer_duration(
+            raw_value=buffer_cfg["window_size"], field_name="buffer.window_size"
         )
+        self.retention = _parse_buffer_duration(
+            raw_value=buffer_cfg["retention"], field_name="buffer.retention"
+        )
+        if self.retention < self.window_size:
+            raise ValueError(
+                "buffer.retention must be greater than or equal to buffer.window_size"
+            )
 
         # vehicle-type-specific settings
         self.vehicle_type = vehicle_type
@@ -161,7 +171,6 @@ class StreamingWindowBuffer:
         )
 
         # buffer database settings
-        buffer_cfg = resolved_runtime_config["serving"]["streaming"]["buffer"]
         self.buffer_table_name = buffer_cfg["db_table_name"]
         self.buffer_db_path = (
             Path(buffer_cfg["db_base_path"]) / f"{vehicle_type}.duckdb"
@@ -336,3 +345,44 @@ class StreamingWindowBuffer:
         self.advance_window(window_end)
 
         return row_count
+
+    def delete_expired_rows(self, mimic_current_time: datetime) -> int:
+        """
+        Delete expired rows from the DuckDB buffer table for this vehicle type.
+
+        A row is considered expired when its normalized UTC event-time value is
+        older than `mimic_current_time - self.retention`.
+
+        Args:
+            mimic_current_time: Current service time in UTC, supplied by the
+                streaming service loop.
+
+        Returns:
+            Number of rows deleted from the buffer table.
+            Returns 0 if the buffer table does not exist or no rows are expired.
+        """
+        retention_cutoff = mimic_current_time - self.retention
+
+        with duckdb.connect(str(self.buffer_db_path)) as con:
+            if not self._table_exists(con, self.buffer_table_name):
+                return 0
+
+            query = f"""
+                DELETE FROM {self.buffer_table_name}
+                WHERE {self.event_time_column_utc} < ?
+                RETURNING 1
+            """
+            query_params = [retention_cutoff]
+            deleted_rows = con.execute(query, query_params).fetchall()
+
+        deleted_count = len(deleted_rows)
+
+        if deleted_count > 0:
+            logger.info(
+                "Delete expired buffer rows | vehicle_type=%s | deleted_count=%d | retention_cutoff_exclusive=%s",
+                self.vehicle_type,
+                deleted_count,
+                retention_cutoff,
+            )
+
+        return deleted_count

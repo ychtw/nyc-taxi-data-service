@@ -32,6 +32,13 @@ defaults:
           # - valid range: 1m to 1d
           # - seconds and float values are not supported
           window_size: "1m"
+          # `retention`: how long rows are kept in the DuckDB buffer
+          # before they become eligible for deletion
+          # - format: "<integer><unit>" (no spaces)
+          # - allowed units: m=minutes, h=hours, d=days
+          # - valid range: 1m to 1d
+          # - must be >= window_size
+          retention: "1m"
           # DuckDB staging database location
           db_base_path: "data/stream_buffer"
           # table name inside the DuckDB buffer database

@@ -2,11 +2,11 @@ from datetime import timedelta
 
 import pytest
 
-from nyc_taxi_data_service.serving.streaming.window_buffer import _parse_window_size
+from nyc_taxi_data_service.serving.streaming.window_buffer import _parse_buffer_duration
 
 
 @pytest.mark.parametrize(
-    ("window_size", "expected"),
+    ("raw_value", "expected"),
     [
         ("1m", timedelta(minutes=1)),
         ("30m", timedelta(minutes=30)),
@@ -14,18 +14,20 @@ from nyc_taxi_data_service.serving.streaming.window_buffer import _parse_window_
         ("1d", timedelta(days=1)),
     ],
 )
-def test_parse_window_size_accepts_valid_values(
-    window_size: str,
+def test_parse_buffer_duration_accepts_valid_values(
+    raw_value: str,
     expected: timedelta,
 ) -> None:
-    """Parse valid window-size strings into timedelta."""
-    result = _parse_window_size(window_size)
+    """Parse valid buffer duration strings into timedelta."""
+    result = _parse_buffer_duration(
+        raw_value=raw_value, field_name="buffer.window_size"
+    )
 
     assert result == expected
 
 
 @pytest.mark.parametrize(
-    "window_size",
+    "raw_value",
     [
         "90",
         "30s",
@@ -35,34 +37,34 @@ def test_parse_window_size_accepts_valid_values(
         "2D",
     ],
 )
-def test_parse_window_size_rejects_invalid_format(window_size: str) -> None:
-    """Reject window-size strings that do not match the supported format."""
-    with pytest.raises(ValueError, match="Invalid window_size format"):
-        _parse_window_size(window_size)
+def test_parse_buffer_duration_rejects_invalid_format(raw_value: str) -> None:
+    """Reject buffer duration strings that do not match the supported format."""
+    with pytest.raises(ValueError, match="Invalid buffer.window_size format"):
+        _parse_buffer_duration(raw_value=raw_value, field_name="buffer.window_size")
 
 
-def test_parse_window_size_rejects_too_short_value() -> None:
-    """Reject window sizes shorter than the minimum allowed duration."""
-    with pytest.raises(ValueError, match="too short"):
-        _parse_window_size("0m")
+def test_parse_buffer_duration_rejects_too_short_value() -> None:
+    """Reject retention values shorter than the minimum allowed duration."""
+    with pytest.raises(ValueError, match="buffer.retention.*too short"):
+        _parse_buffer_duration(raw_value="0m", field_name="buffer.retention")
 
 
 @pytest.mark.parametrize(
-    "window_size",
+    "raw_value",
     [
         "2d",
         "25h",
         "1441m",
     ],
 )
-def test_parse_window_size_rejects_too_long_values(window_size: str) -> None:
-    """Reject window sizes longer than the maximum allowed duration."""
+def test_parse_buffer_duration_rejects_too_long_values(raw_value: str) -> None:
+    """Reject buffer duration longer than the maximum allowed duration."""
     with pytest.raises(ValueError, match="too long"):
-        _parse_window_size(window_size)
+        _parse_buffer_duration(raw_value=raw_value, field_name="buffer.window_size")
 
 
-@pytest.mark.parametrize("window_size", [30, None, 1.5, [], {}])
-def test_parse_window_size_rejects_non_string_inputs(window_size: object) -> None:
+@pytest.mark.parametrize("raw_value", [30, None, 1.5, [], {}])
+def test_parse_buffer_duration_rejects_non_string_inputs(raw_value: object) -> None:
     """Reject non-string input values."""
-    with pytest.raises(ValueError, match="window_size must be a string"):
-        _parse_window_size(window_size)
+    with pytest.raises(ValueError, match="buffer.retention must be a string"):
+        _parse_buffer_duration(raw_value=raw_value, field_name="buffer.retention")

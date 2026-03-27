@@ -216,91 +216,6 @@ def test_run_streaming_closes_all_replay_producers_in_finally(
     green_producer.close.assert_called_once_with(timeout=10.0)
 
 
-def test_run_streaming_buffers_additional_window_when_not_half_window_ahead(
-    mocker,
-) -> None:
-    """Buffer another window when the next window start is not far enough ahead."""
-    resolved_runtime_config = build_resolved_runtime_config_for_run_streaming()
-
-    window_size = timedelta(minutes=30)
-    publish_interval = timedelta(seconds=5)
-    stream_end_time = datetime(2025, 1, 15, 9, 0, tzinfo=timezone.utc)
-    first_loop_mimic_time = datetime(2025, 1, 15, 8, 20, tzinfo=timezone.utc)
-
-    mocker.patch(
-        "nyc_taxi_data_service.serving.streaming.pipeline._build_stream_exhaustion_boundary",
-        return_value=stream_end_time,
-    )
-    mocker.patch(
-        "nyc_taxi_data_service.serving.streaming.pipeline._resolve_stream_timing_config",
-        return_value=(window_size, publish_interval),
-    )
-
-    mock_service_clock = Mock()
-    mock_service_clock.mimic_service_start_time = datetime(
-        2025, 1, 15, 8, 0, tzinfo=timezone.utc
-    )
-    mock_service_clock.now.side_effect = [
-        datetime(2025, 1, 15, 8, 0, tzinfo=timezone.utc),  # initial publish
-        first_loop_mimic_time,  # main loop iteration
-        stream_end_time,  # next loop -> exit
-    ]
-    mocker.patch(
-        "nyc_taxi_data_service.serving.streaming.pipeline.ServiceClock",
-        return_value=mock_service_clock,
-    )
-    mocker.patch(
-        "nyc_taxi_data_service.serving.streaming.pipeline.ensure_streaming_topics_exist"
-    )
-
-    window_buffer = Mock()
-    # first loop iteration:
-    #   08:30 - 08:20 = 10m <= 15m -> buffer once
-    # second check:
-    #   09:00 - 08:20 = 40m > 15m -> stop buffering
-    window_buffer.get_current_window.side_effect = [
-        (
-            datetime(2025, 1, 15, 8, 30, tzinfo=timezone.utc),
-            datetime(2025, 1, 15, 9, 0, tzinfo=timezone.utc),
-        ),
-        (
-            datetime(2025, 1, 15, 9, 0, tzinfo=timezone.utc),
-            datetime(2025, 1, 15, 9, 30, tzinfo=timezone.utc),
-        ),
-    ]
-    replay_producer = Mock()
-
-    mocker.patch(
-        "nyc_taxi_data_service.serving.streaming.pipeline._build_streaming_components",
-        return_value=(window_buffer, replay_producer),
-    )
-    mocker.patch(
-        "nyc_taxi_data_service.serving.streaming.pipeline._run_initial_buffering"
-    )
-    mocker.patch("nyc_taxi_data_service.serving.streaming.pipeline._run_publish_cycle")
-    real_datetime = datetime
-    mock_datetime = Mock(wraps=real_datetime)
-    mock_datetime.now.side_effect = [
-        datetime(2025, 1, 15, 8, 0, tzinfo=timezone.utc),
-        datetime(2025, 1, 15, 8, 1, tzinfo=timezone.utc),
-    ]
-    mocker.patch(
-        "nyc_taxi_data_service.serving.streaming.pipeline.datetime",
-        mock_datetime,
-    )
-
-    mock_sleep = mocker.patch(
-        "nyc_taxi_data_service.serving.streaming.pipeline.time.sleep"
-    )
-
-    resolved_runtime_config["vehicle_types"] = ["yellow"]
-
-    run_streaming(resolved_runtime_config)
-
-    window_buffer.buffer_current_window.assert_called_once_with()
-    mock_sleep.assert_called_once()
-
-
 def test_run_streaming_does_not_buffer_when_next_window_is_far_enough_ahead(
     mocker,
 ) -> None:
@@ -394,3 +309,261 @@ def test_run_streaming_raises_for_invalid_mimic_current_date(mocker) -> None:
 
     with pytest.raises(ValueError):
         run_streaming(resolved_runtime_config)
+
+
+def test_run_streaming_buffers_and_deletes_expired_rows_when_not_half_window_ahead(
+    mocker,
+) -> None:
+    """Buffer another window and run retention cleanup when not far enough ahead."""
+    resolved_runtime_config = build_resolved_runtime_config_for_run_streaming()
+
+    window_size = timedelta(minutes=30)
+    publish_interval = timedelta(seconds=5)
+    stream_end_time = datetime(2025, 1, 15, 9, 0, tzinfo=timezone.utc)
+    first_loop_mimic_time = datetime(2025, 1, 15, 8, 20, tzinfo=timezone.utc)
+
+    mocker.patch(
+        "nyc_taxi_data_service.serving.streaming.pipeline._build_stream_exhaustion_boundary",
+        return_value=stream_end_time,
+    )
+    mocker.patch(
+        "nyc_taxi_data_service.serving.streaming.pipeline._resolve_stream_timing_config",
+        return_value=(window_size, publish_interval),
+    )
+
+    mock_service_clock = Mock()
+    mock_service_clock.mimic_service_start_time = datetime(
+        2025, 1, 15, 8, 0, tzinfo=timezone.utc
+    )
+    mock_service_clock.now.side_effect = [
+        datetime(2025, 1, 15, 8, 0, tzinfo=timezone.utc),  # initial publish
+        first_loop_mimic_time,  # main loop iteration
+        stream_end_time,  # next loop -> exit
+    ]
+    mocker.patch(
+        "nyc_taxi_data_service.serving.streaming.pipeline.ServiceClock",
+        return_value=mock_service_clock,
+    )
+    mocker.patch(
+        "nyc_taxi_data_service.serving.streaming.pipeline.ensure_streaming_topics_exist"
+    )
+
+    window_buffer = Mock()
+    # first loop iteration:
+    #   08:30 - 08:20 = 10m <= 15m -> buffer once
+    # second check:
+    #   09:00 - 08:20 = 40m > 15m -> stop buffering
+    window_buffer.get_current_window.side_effect = [
+        (
+            datetime(2025, 1, 15, 8, 30, tzinfo=timezone.utc),
+            datetime(2025, 1, 15, 9, 0, tzinfo=timezone.utc),
+        ),
+        (
+            datetime(2025, 1, 15, 9, 0, tzinfo=timezone.utc),
+            datetime(2025, 1, 15, 9, 30, tzinfo=timezone.utc),
+        ),
+    ]
+    replay_producer = Mock()
+
+    mocker.patch(
+        "nyc_taxi_data_service.serving.streaming.pipeline._build_streaming_components",
+        return_value=(window_buffer, replay_producer),
+    )
+    mocker.patch(
+        "nyc_taxi_data_service.serving.streaming.pipeline._run_initial_buffering"
+    )
+    mocker.patch("nyc_taxi_data_service.serving.streaming.pipeline._run_publish_cycle")
+
+    real_datetime = datetime
+    mock_datetime = Mock(wraps=real_datetime)
+    mock_datetime.now.side_effect = [
+        datetime(2025, 1, 15, 8, 0, tzinfo=timezone.utc),
+        datetime(2025, 1, 15, 8, 1, tzinfo=timezone.utc),
+    ]
+    mocker.patch(
+        "nyc_taxi_data_service.serving.streaming.pipeline.datetime",
+        mock_datetime,
+    )
+
+    mock_sleep = mocker.patch(
+        "nyc_taxi_data_service.serving.streaming.pipeline.time.sleep"
+    )
+
+    resolved_runtime_config["vehicle_types"] = ["yellow"]
+
+    run_streaming(resolved_runtime_config)
+
+    window_buffer.buffer_current_window.assert_called_once_with()
+    window_buffer.delete_expired_rows.assert_called_once_with(
+        mimic_current_time=first_loop_mimic_time
+    )
+    mock_sleep.assert_called_once()
+
+
+def test_run_streaming_does_not_delete_expired_rows_when_buffering_is_skipped(
+    mocker,
+) -> None:
+    """Skip retention cleanup when the next window is already far enough ahead."""
+    resolved_runtime_config = build_resolved_runtime_config_for_run_streaming()
+
+    window_size = timedelta(minutes=30)
+    publish_interval = timedelta(seconds=5)
+    stream_end_time = datetime(2025, 1, 15, 9, 0, tzinfo=timezone.utc)
+    first_loop_mimic_time = datetime(2025, 1, 15, 8, 10, tzinfo=timezone.utc)
+
+    mocker.patch(
+        "nyc_taxi_data_service.serving.streaming.pipeline._build_stream_exhaustion_boundary",
+        return_value=stream_end_time,
+    )
+    mocker.patch(
+        "nyc_taxi_data_service.serving.streaming.pipeline._resolve_stream_timing_config",
+        return_value=(window_size, publish_interval),
+    )
+
+    mock_service_clock = Mock()
+    mock_service_clock.mimic_service_start_time = datetime(
+        2025, 1, 15, 8, 0, tzinfo=timezone.utc
+    )
+    mock_service_clock.now.side_effect = [
+        datetime(2025, 1, 15, 8, 0, tzinfo=timezone.utc),  # initial publish
+        first_loop_mimic_time,  # main loop iteration
+        stream_end_time,  # next loop -> exit
+    ]
+    mocker.patch(
+        "nyc_taxi_data_service.serving.streaming.pipeline.ServiceClock",
+        return_value=mock_service_clock,
+    )
+    mocker.patch(
+        "nyc_taxi_data_service.serving.streaming.pipeline.ensure_streaming_topics_exist"
+    )
+
+    window_buffer = Mock()
+    # 08:30 - 08:10 = 20m > 15m -> should not buffer
+    window_buffer.get_current_window.return_value = (
+        datetime(2025, 1, 15, 8, 30, tzinfo=timezone.utc),
+        datetime(2025, 1, 15, 9, 0, tzinfo=timezone.utc),
+    )
+    replay_producer = Mock()
+
+    mocker.patch(
+        "nyc_taxi_data_service.serving.streaming.pipeline._build_streaming_components",
+        return_value=(window_buffer, replay_producer),
+    )
+    mocker.patch(
+        "nyc_taxi_data_service.serving.streaming.pipeline._run_initial_buffering"
+    )
+    mocker.patch("nyc_taxi_data_service.serving.streaming.pipeline._run_publish_cycle")
+
+    real_datetime = datetime
+    mock_datetime = Mock(wraps=real_datetime)
+    mock_datetime.now.side_effect = [
+        datetime(2025, 1, 15, 8, 0, tzinfo=timezone.utc),
+        datetime(2025, 1, 15, 8, 1, tzinfo=timezone.utc),
+    ]
+    mocker.patch(
+        "nyc_taxi_data_service.serving.streaming.pipeline.datetime",
+        mock_datetime,
+    )
+
+    mock_sleep = mocker.patch(
+        "nyc_taxi_data_service.serving.streaming.pipeline.time.sleep"
+    )
+
+    resolved_runtime_config["vehicle_types"] = ["yellow"]
+
+    run_streaming(resolved_runtime_config)
+
+    window_buffer.buffer_current_window.assert_not_called()
+    window_buffer.delete_expired_rows.assert_not_called()
+    mock_sleep.assert_called_once()
+
+
+def test_run_streaming_deletes_expired_rows_after_each_buffer_fill_when_catching_up(
+    mocker,
+) -> None:
+    """Run retention cleanup after each buffer fill when the buffer loop catches up."""
+    resolved_runtime_config = build_resolved_runtime_config_for_run_streaming()
+    resolved_runtime_config["vehicle_types"] = ["yellow"]
+
+    window_size = timedelta(minutes=30)
+    publish_interval = timedelta(seconds=5)
+    stream_end_time = datetime(2025, 1, 15, 10, 0, tzinfo=timezone.utc)
+    first_loop_mimic_time = datetime(2025, 1, 15, 8, 40, tzinfo=timezone.utc)
+
+    mocker.patch(
+        "nyc_taxi_data_service.serving.streaming.pipeline._build_stream_exhaustion_boundary",
+        return_value=stream_end_time,
+    )
+    mocker.patch(
+        "nyc_taxi_data_service.serving.streaming.pipeline._resolve_stream_timing_config",
+        return_value=(window_size, publish_interval),
+    )
+
+    mock_service_clock = Mock()
+    mock_service_clock.mimic_service_start_time = datetime(
+        2025, 1, 15, 8, 0, tzinfo=timezone.utc
+    )
+    mock_service_clock.now.side_effect = [
+        datetime(2025, 1, 15, 8, 0, tzinfo=timezone.utc),  # initial publish
+        first_loop_mimic_time,  # first main-loop iteration
+        stream_end_time,  # second main-loop iteration -> exit
+    ]
+    mocker.patch(
+        "nyc_taxi_data_service.serving.streaming.pipeline.ServiceClock",
+        return_value=mock_service_clock,
+    )
+    mocker.patch(
+        "nyc_taxi_data_service.serving.streaming.pipeline.ensure_streaming_topics_exist"
+    )
+
+    window_buffer = Mock()
+    # half-window threshold = 15 minutes.
+    #
+    # 08:20 - 08:40 = -20m -> buffer
+    # 08:35 - 08:40 = -5m  -> buffer
+    # 09:10 - 08:40 = 30m  -> stop buffering
+    window_buffer.get_current_window.side_effect = [
+        (
+            datetime(2025, 1, 15, 8, 20, tzinfo=timezone.utc),
+            datetime(2025, 1, 15, 8, 50, tzinfo=timezone.utc),
+        ),
+        (
+            datetime(2025, 1, 15, 8, 35, tzinfo=timezone.utc),
+            datetime(2025, 1, 15, 9, 5, tzinfo=timezone.utc),
+        ),
+        (
+            datetime(2025, 1, 15, 9, 10, tzinfo=timezone.utc),
+            datetime(2025, 1, 15, 9, 40, tzinfo=timezone.utc),
+        ),
+    ]
+    replay_producer = Mock()
+
+    mocker.patch(
+        "nyc_taxi_data_service.serving.streaming.pipeline._build_streaming_components",
+        return_value=(window_buffer, replay_producer),
+    )
+    mocker.patch(
+        "nyc_taxi_data_service.serving.streaming.pipeline._run_initial_buffering"
+    )
+    mocker.patch("nyc_taxi_data_service.serving.streaming.pipeline._run_publish_cycle")
+
+    real_datetime = datetime
+    mock_datetime = Mock(wraps=real_datetime)
+    mock_datetime.now.side_effect = [
+        datetime(2025, 1, 15, 8, 0, tzinfo=timezone.utc),
+        datetime(2025, 1, 15, 8, 1, tzinfo=timezone.utc),
+    ]
+    mocker.patch(
+        "nyc_taxi_data_service.serving.streaming.pipeline.datetime",
+        mock_datetime,
+    )
+
+    mocker.patch("nyc_taxi_data_service.serving.streaming.pipeline.time.sleep")
+
+    run_streaming(resolved_runtime_config)
+
+    assert window_buffer.buffer_current_window.call_count == 2
+    assert window_buffer.delete_expired_rows.call_args_list == [
+        call(mimic_current_time=first_loop_mimic_time),
+        call(mimic_current_time=first_loop_mimic_time),
+    ]

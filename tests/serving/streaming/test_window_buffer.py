@@ -32,6 +32,7 @@ def resolved_runtime_config(tmp_path: Path) -> dict:
             "streaming": {
                 "buffer": {
                     "window_size": "5m",
+                    "retention": "1h",
                     "db_base_path": str(tmp_path / "data" / "stream_buffer"),
                     "db_table_name": "buffered_data",
                 },
@@ -409,3 +410,161 @@ def test_buffer_current_window_materializes_utc_event_time_column(
             datetime(2025, 1, 15, 14, 1, 0),
         ),
     ]
+
+
+def test_delete_expired_rows_returns_zero_when_buffer_table_does_not_exist(
+    resolved_runtime_config: dict,
+    mimic_service_start_time: datetime,
+) -> None:
+    """Return 0 when cleanup runs before any buffer table has been created."""
+    buffer = StreamingWindowBuffer(
+        vehicle_type="yellow",
+        resolved_runtime_config=resolved_runtime_config,
+        mimic_service_start_time=mimic_service_start_time,
+    )
+
+    deleted_count = buffer.delete_expired_rows(
+        mimic_current_time=datetime(2025, 1, 15, 14, 30, 0, tzinfo=timezone.utc)
+    )
+
+    assert deleted_count == 0
+
+
+def test_delete_expired_rows_returns_zero_when_no_rows_are_expired(
+    resolved_runtime_config: dict,
+    mimic_service_start_time: datetime,
+) -> None:
+    """Return 0 and keep all rows when none are older than the retention cutoff."""
+    buffer = StreamingWindowBuffer(
+        vehicle_type="yellow",
+        resolved_runtime_config=resolved_runtime_config,
+        mimic_service_start_time=mimic_service_start_time,
+    )
+    mimic_current_time = datetime(2025, 1, 15, 14, 30, 0, tzinfo=timezone.utc)
+
+    with duckdb.connect(str(buffer.buffer_db_path)) as con:
+        con.execute(
+            f"""
+            CREATE TABLE {buffer.buffer_table_name} (
+                {buffer.event_time_column_utc} TIMESTAMPTZ
+            )
+            """
+        )
+        con.execute(
+            f"""
+            INSERT INTO {buffer.buffer_table_name}
+            VALUES (?), (?)
+            """,
+            [
+                datetime(2025, 1, 15, 13, 30, 0, tzinfo=timezone.utc),
+                datetime(2025, 1, 15, 13, 45, 0, tzinfo=timezone.utc),
+            ],
+        )
+
+    deleted_count = buffer.delete_expired_rows(mimic_current_time=mimic_current_time)
+
+    assert deleted_count == 0
+
+    with duckdb.connect(str(buffer.buffer_db_path)) as con:
+        remaining_count = con.execute(
+            f"SELECT COUNT(*) FROM {buffer.buffer_table_name}"
+        ).fetchone()[0]
+
+    assert remaining_count == 2
+
+
+def test_delete_expired_rows_deletes_only_rows_older_than_retention_cutoff(
+    resolved_runtime_config: dict,
+    mimic_service_start_time: datetime,
+) -> None:
+    """Delete only rows strictly older than the retention cutoff."""
+    buffer = StreamingWindowBuffer(
+        vehicle_type="yellow",
+        resolved_runtime_config=resolved_runtime_config,
+        mimic_service_start_time=mimic_service_start_time,
+    )
+    mimic_current_time = datetime(2025, 1, 15, 14, 30, 0, tzinfo=timezone.utc)
+
+    with duckdb.connect(str(buffer.buffer_db_path)) as con:
+        con.execute(
+            f"""
+            CREATE TABLE {buffer.buffer_table_name} (
+                {buffer.event_time_column_utc} TIMESTAMPTZ
+            )
+            """
+        )
+        con.execute(
+            f"""
+            INSERT INTO {buffer.buffer_table_name}
+            VALUES (?), (?), (?), (?)
+            """,
+            [
+                datetime(2025, 1, 15, 13, 29, 59, tzinfo=timezone.utc),  # expired
+                datetime(2025, 1, 15, 12, 0, 0, tzinfo=timezone.utc),  # expired
+                datetime(
+                    2025, 1, 15, 13, 30, 0, tzinfo=timezone.utc
+                ),  # exact cutoff; keep
+                datetime(2025, 1, 15, 14, 0, 0, tzinfo=timezone.utc),  # keep
+            ],
+        )
+
+    deleted_count = buffer.delete_expired_rows(mimic_current_time=mimic_current_time)
+
+    assert deleted_count == 2
+
+    with duckdb.connect(str(buffer.buffer_db_path)) as con:
+        remaining_rows = con.execute(
+            f"""
+            SELECT {buffer.event_time_column_utc}
+            FROM {buffer.buffer_table_name}
+            ORDER BY {buffer.event_time_column_utc}
+            """
+        ).fetchall()
+
+    assert remaining_rows == [
+        (datetime(2025, 1, 15, 13, 30, 0, tzinfo=timezone.utc),),
+        (datetime(2025, 1, 15, 14, 0, 0, tzinfo=timezone.utc),),
+    ]
+
+
+def test_delete_expired_rows_logs_when_rows_are_deleted(
+    resolved_runtime_config: dict,
+    mimic_service_start_time: datetime,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Log an info message when expired rows are deleted."""
+    buffer = StreamingWindowBuffer(
+        vehicle_type="yellow",
+        resolved_runtime_config=resolved_runtime_config,
+        mimic_service_start_time=mimic_service_start_time,
+    )
+    mimic_current_time = datetime(2025, 1, 15, 14, 30, 0, tzinfo=timezone.utc)
+
+    with duckdb.connect(str(buffer.buffer_db_path)) as con:
+        con.execute(
+            f"""
+            CREATE TABLE {buffer.buffer_table_name} (
+                {buffer.event_time_column_utc} TIMESTAMPTZ
+            )
+            """
+        )
+        con.execute(
+            f"""
+            INSERT INTO {buffer.buffer_table_name}
+            VALUES (?), (?)
+            """,
+            [
+                datetime(2025, 1, 15, 13, 0, 0, tzinfo=timezone.utc),  # expired
+                datetime(2025, 1, 15, 14, 0, 0, tzinfo=timezone.utc),  # keep
+            ],
+        )
+
+    with caplog.at_level("INFO"):
+        deleted_count = buffer.delete_expired_rows(
+            mimic_current_time=mimic_current_time
+        )
+
+    assert deleted_count == 1
+    assert "Delete expired buffer rows" in caplog.text
+    assert "vehicle_type=yellow" in caplog.text
+    assert "deleted_count=1" in caplog.text

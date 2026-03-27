@@ -14,7 +14,7 @@ from nyc_taxi_data_service.serving.streaming.kafka_admin import (
 from nyc_taxi_data_service.serving.streaming.kafka_producer import KafkaReplayProducer
 from nyc_taxi_data_service.serving.streaming.window_buffer import (
     StreamingWindowBuffer,
-    _parse_window_size,
+    _parse_buffer_duration,
 )
 from nyc_taxi_data_service.utils.log_util import setup_logging
 
@@ -118,7 +118,7 @@ def _resolve_stream_timing_config(
     resolved_runtime_config: dict,
 ) -> tuple[timedelta, timedelta]:
     """
-    Resolve window size and publish interval from the runtime config.
+    Resolve window size, retention, and publish interval from the runtime config.
 
     This helper reads streaming buffer and Kafka timing settings from the
     resolved runtime config, parses them into timedeltas, and validates that
@@ -130,25 +130,31 @@ def _resolve_stream_timing_config(
 
     Returns:
         A tuple of:
-            (window_size, publish_interval)
+            (window_size, retention, publish_interval)
     """
 
     buffer_config = resolved_runtime_config["serving"]["streaming"]["buffer"]
     kafka_config = resolved_runtime_config["serving"]["streaming"]["kafka"]
 
     logger.info(
-        "Streaming timing config | window_size=%s | publish_interval=%s",
+        "Streaming timing config | window_size=%s | retention=%s | publish_interval=%s",
         buffer_config["window_size"],
+        buffer_config["retention"],
         kafka_config["publish_interval"],
     )
 
-    window_size = _parse_window_size(buffer_config["window_size"])
+    window_size = _parse_buffer_duration(
+        raw_value=buffer_config["window_size"], field_name="buffer.window_size"
+    )
+    retention = _parse_buffer_duration(
+        raw_value=buffer_config["retention"], field_name="buffer.retention"
+    )
     publish_interval = _parse_publish_interval(
         publish_interval=kafka_config["publish_interval"],
         window_size=window_size,
     )
 
-    return window_size, publish_interval
+    return window_size, retention, publish_interval
 
 
 def _build_streaming_components(
@@ -297,7 +303,7 @@ def run_streaming(resolved_runtime_config: dict) -> None:
     # get 2 timing controls used by the streaming service:
     # - window_size: how much source data each buffer-fill query stages into DuckDB
     # - publish_interval: how often buffered rows are replayed from DuckDB to Kafka
-    window_size, publish_interval = _resolve_stream_timing_config(
+    window_size, retention, publish_interval = _resolve_stream_timing_config(
         resolved_runtime_config=resolved_runtime_config
     )
     publish_interval_seconds = publish_interval.total_seconds()
@@ -396,6 +402,10 @@ def run_streaming(resolved_runtime_config: dict) -> None:
                         window_start,
                     )
                     window_buffer.buffer_current_window()
+                    # remove rows older than retention to prevent unbounded buffer growth
+                    window_buffer.delete_expired_rows(
+                        mimic_current_time=mimic_current_time
+                    )
 
             # publish buffered rows on schedule
             now = datetime.now(timezone.utc)
