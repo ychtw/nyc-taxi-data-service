@@ -10,7 +10,7 @@ from nyc_taxi_data_service.serving.streaming.window_buffer import StreamingWindo
 @pytest.fixture
 def mimic_service_start_time() -> datetime:
     """Provide a deterministic mimic service start time for streaming buffer tests."""
-    fixed_mimic_start = datetime(2025, 1, 15, 9, 0, 0, tzinfo=timezone.utc)
+    fixed_mimic_start = datetime(2025, 1, 15, 14, 0, 0, tzinfo=timezone.utc)
     return fixed_mimic_start
 
 
@@ -93,6 +93,7 @@ def test_init_sets_config_derived_attributes_and_creates_fresh_buffer_db(
     assert buffer.vehicle_type == "yellow"
     assert buffer.window_size == timedelta(minutes=5)
     assert buffer.event_time_column == "tpep_dropoff_datetime"
+    assert buffer.event_time_column_utc == "tpep_dropoff_datetime_utc"
     assert buffer.vehicle_data_path == Path(raw_base_path) / "yellow"
     assert buffer.buffer_table_name == buffer_cfg["db_table_name"]
     assert buffer.buffer_db_path == Path(buffer_cfg["db_base_path"]) / "yellow.duckdb"
@@ -138,8 +139,8 @@ def test_get_current_window_returns_next_start_and_configured_end(
 
     window_start, window_end = buffer.get_current_window()
 
-    assert window_start == datetime(2025, 1, 15, 9, 0, 0, tzinfo=timezone.utc)
-    assert window_end == datetime(2025, 1, 15, 9, 5, 0, tzinfo=timezone.utc)
+    assert window_start == datetime(2025, 1, 15, 14, 0, 0, tzinfo=timezone.utc)
+    assert window_end == datetime(2025, 1, 15, 14, 5, 0, tzinfo=timezone.utc)
 
 
 def test_advance_window_updates_next_window_start(
@@ -154,7 +155,7 @@ def test_advance_window_updates_next_window_start(
         mimic_service_start_time=mimic_service_start_time,
     )
 
-    new_window_end = datetime(2025, 1, 15, 9, 5, 0, tzinfo=timezone.utc)
+    new_window_end = datetime(2025, 1, 15, 14, 5, 0, tzinfo=timezone.utc)
     buffer.advance_window(new_window_end)
 
     assert buffer._next_window_start == new_window_end
@@ -182,6 +183,7 @@ def test_buffer_current_window_creates_buffer_table_and_returns_row_count(
     _write_test_parquet(
         base_path=raw_base_path,
         vehicle_type="yellow",
+        # note: in 'America/New_York' time zone to mimic what's shown in NYC TLC data
         rows=[
             ("2025-01-15 09:00:00", 1),
             ("2025-01-15 09:02:00", 2),
@@ -200,7 +202,7 @@ def test_buffer_current_window_creates_buffer_table_and_returns_row_count(
 
     assert row_count == 3
     assert buffer._next_window_start == datetime(
-        2025, 1, 15, 9, 5, 0, tzinfo=timezone.utc
+        2025, 1, 15, 14, 5, 0, tzinfo=timezone.utc
     )
 
     with duckdb.connect(str(buffer.buffer_db_path)) as con:
@@ -239,7 +241,7 @@ def test_buffer_current_window_returns_zero_and_advances_for_empty_window(
 
     assert row_count == 0
     assert buffer._next_window_start == datetime(
-        2025, 1, 15, 9, 5, 0, tzinfo=timezone.utc
+        2025, 1, 15, 14, 5, 0, tzinfo=timezone.utc
     )
 
     with duckdb.connect(str(buffer.buffer_db_path)) as con:
@@ -278,7 +280,7 @@ def test_buffer_current_window_appends_rows_on_later_calls(
     assert first_count == 2
     assert second_count == 2
     assert buffer._next_window_start == datetime(
-        2025, 1, 15, 9, 10, 0, tzinfo=timezone.utc
+        2025, 1, 15, 14, 10, 0, tzinfo=timezone.utc
     )
 
     with duckdb.connect(str(buffer.buffer_db_path)) as con:
@@ -341,7 +343,7 @@ def test_buffer_current_window_buffers_rows_in_event_time_order(
             f"""
             SELECT {buffer.event_time_column}, test_value
             FROM {buffer.buffer_table_name}
-            ORDER BY {buffer.event_time_column} ASC
+            ORDER BY {buffer.event_time_column_utc} ASC
             """
         ).fetchall()
 
@@ -350,3 +352,60 @@ def test_buffer_current_window_buffers_rows_in_event_time_order(
 
     assert event_times == sorted(event_times)
     assert test_values == [10, 15, 20, 40]
+
+
+def test_to_nyc_local_timestamp_value_converts_utc_to_naive_new_york_time() -> None:
+    """Convert aware UTC datetime into naive New York local datetime."""
+    dt_utc = datetime(2025, 1, 15, 14, 0, 0, tzinfo=timezone.utc)
+
+    actual = StreamingWindowBuffer._to_nyc_local_timestamp_value(dt_utc)
+
+    assert actual == datetime(2025, 1, 15, 9, 0, 0)
+    assert actual.tzinfo is None
+
+
+def test_buffer_current_window_materializes_utc_event_time_column(
+    resolved_runtime_config: dict,
+    mimic_service_start_time: datetime,
+) -> None:
+    """Materialize a UTC-normalized event-time column in the buffer table."""
+    raw_base_path = Path(resolved_runtime_config["storage"]["target_base_path"])
+
+    _write_test_parquet(
+        base_path=raw_base_path,
+        vehicle_type="yellow",
+        rows=[
+            ("2025-01-15 09:00:00", 10),
+            ("2025-01-15 09:01:00", 15),
+        ],
+    )
+
+    buffer = StreamingWindowBuffer(
+        vehicle_type="yellow",
+        resolved_runtime_config=resolved_runtime_config,
+        mimic_service_start_time=mimic_service_start_time,
+    )
+
+    row_count = buffer.buffer_current_window()
+
+    assert row_count == 2
+
+    with duckdb.connect(str(buffer.buffer_db_path)) as con:
+        rows = con.execute(
+            f"""
+            SELECT {buffer.event_time_column}, {buffer.event_time_column_utc}
+            FROM {buffer.buffer_table_name}
+            ORDER BY {buffer.event_time_column_utc} ASC
+            """
+        ).fetchall()
+
+    assert rows == [
+        (
+            datetime(2025, 1, 15, 9, 0, 0),
+            datetime(2025, 1, 15, 14, 0, 0),
+        ),
+        (
+            datetime(2025, 1, 15, 9, 1, 0),
+            datetime(2025, 1, 15, 14, 1, 0),
+        ),
+    ]

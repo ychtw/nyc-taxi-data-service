@@ -119,10 +119,7 @@ def test_on_delivery_logs_warning_when_error_is_present(
 
     # verify the log message includes the key delivery context fields plus the error
     assert logger.warning_messages == [
-        "Delivery failed for topic=nyc_taxi_yellow "
-        "partition=2 "
-        "offset=15 "
-        "error=broker unavailable"
+        "Delivery failed | topic=nyc_taxi_yellow | partition=2 | offset=15 | error=broker unavailable"
     ]
 
 

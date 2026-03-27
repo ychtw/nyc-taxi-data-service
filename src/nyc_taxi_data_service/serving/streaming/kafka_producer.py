@@ -1,7 +1,7 @@
 import json
 import logging
 import textwrap
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 import duckdb
@@ -56,6 +56,7 @@ class KafkaReplayProducer:
         if vehicle_type not in event_time_map:
             raise ValueError(f"Unsupported vehicle_type: {vehicle_type}")
         self.event_time_column = event_time_map[vehicle_type]
+        self.event_time_column_utc = f"{self.event_time_column}_utc"
 
         # buffer source settings
         # each vehicle type (yellow, green, etc.) has its own physical DuckDB file
@@ -132,20 +133,53 @@ class KafkaReplayProducer:
 
         return producer_config
 
-    def close(self, timeout: float = 10.0) -> int:
+    @staticmethod
+    def _table_exists(con: duckdb.DuckDBPyConnection, table_name: str) -> bool:
         """
-        Flush queued Kafka messages before shutdown.
+        Return whether the given table exists in the current DuckDB database.
+        """
+        try:
+            con.table(table_name)
+            return True
+        except duckdb.CatalogException:
+            return False
+
+    @staticmethod
+    def _from_duckdb_timestamp_value(dt: datetime) -> datetime:
+        """
+        Normalize a DuckDB TIMESTAMP value into an aware UTC datetime.
+
+        DuckDB returns TIMESTAMP values without timezone information. For replay
+        state kept in Python, normalize those values into timezone-aware UTC
+        datetimes so in-memory watermark state stays consistent with ServiceClock.
+        """
+        if dt.tzinfo is None:
+            return dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc)
+
+    @staticmethod
+    def _to_duckdb_timestamp_value(dt: datetime) -> datetime:
+        """
+        Normalize a replay-boundary datetime for DuckDB TIMESTAMP comparisons.
+
+        ServiceClock produces timezone-aware UTC datetimes, but the buffered event
+        time values queried from DuckDB are compared as plain TIMESTAMP values.
+        During local replay, passing aware UTC datetimes directly into DuckDB
+        comparison parameters caused eligible buffered rows to be missed.
+
+        To keep the comparison semantics consistent, this helper converts aware UTC
+        datetimes into naive UTC datetimes before they are used as SQL query
+        parameters. If the input is already naive, it is returned unchanged.
 
         Args:
-            timeout: Maximum number of seconds to wait for queued and in-flight
-                messages to be delivered.
+            dt: Datetime value used as a replay query boundary.
 
         Returns:
-            Number of messages still queued after the flush timeout expires.
+            A naive UTC datetime suitable for DuckDB TIMESTAMP comparisons.
         """
-        # flush blocks until all messages currently in the producer's internal
-        # buffer are delivered or the timeout is reached
-        return self._producer.flush(timeout)
+        if dt.tzinfo is None:
+            return dt
+        return dt.astimezone(timezone.utc).replace(tzinfo=None)
 
     def publish_available(self, mimic_current_time: datetime) -> int:
         """
@@ -162,16 +196,64 @@ class KafkaReplayProducer:
         Returns:
             Number of rows published in this replay cycle.
         """
+        logger.debug(
+            "Publish available rows | vehicle_type=%s | watermark=%s | mimic_current_time=%s",
+            self.vehicle_type,
+            self._replay_watermark,
+            mimic_current_time,
+        )
+
         rows = self._fetch_eligible_rows(mimic_current_time)
+        logger.debug(
+            "Fetched %d eligible buffered rows for publish | vehicle_type=%s",
+            len(rows),
+            self.vehicle_type,
+        )
         if not rows:
             return 0
 
-        # only advance the watermark after the batch is successfully
-        # handed off to the internal producer buffer
+        # only advance the watermark after the batch has been successfully
+        # produced and flushed for this replay cycle
         published_count, max_event_time = self._publish_rows(rows)
         self._replay_watermark = max_event_time
 
+        logger.info(
+            "Publish cycle complete | vehicle_type=%s | published_count=%d | new_watermark=%s",
+            self.vehicle_type,
+            published_count,
+            self._replay_watermark,
+        )
+
         return published_count
+
+    def _get_fetch_bounds(
+        self,
+        mimic_current_time: datetime,
+    ) -> tuple[datetime, datetime]:
+        """
+        Build the lower and upper replay bounds for the current fetch query.
+
+        Replay state is kept as aware UTC datetimes in Python, but DuckDB compares
+        against plain TIMESTAMP values in the buffer table. This helper therefore
+        normalizes both bounds into naive UTC datetimes before they are used as SQL
+        query parameters.
+
+        Args:
+            mimic_current_time: Current service time used as the inclusive upper
+                bound of the replay window.
+
+        Returns:
+            A tuple of:
+                (lower_bound, upper_bound)
+        """
+        if self._replay_watermark is None:
+            lower_bound = self._to_duckdb_timestamp_value(self.mimic_service_start_time)
+        else:
+            lower_bound = self._to_duckdb_timestamp_value(self._replay_watermark)
+
+        upper_bound = self._to_duckdb_timestamp_value(mimic_current_time)
+
+        return lower_bound, upper_bound
 
     def _fetch_eligible_rows(self, mimic_current_time: datetime) -> list[dict]:
         """
@@ -190,35 +272,84 @@ class KafkaReplayProducer:
         Returns:
             A list of buffered row dictionaries eligible to be published.
         """
+        logger.debug(
+            "Fetch eligible rows | vehicle_type=%s | branch=%s | watermark=%s | mimic_service_start_time=%s | mimic_current_time=%s",
+            self.vehicle_type,
+            "initial" if self._replay_watermark is None else "incremental",
+            self._replay_watermark,
+            self.mimic_service_start_time,
+            mimic_current_time,
+        )
+
         # construct parameterized query
-        # the window is (replay watermark, mimic current time]
+        # fetch window:
+        # - initial: [mimic_service_start_time, mimic_current_time]
+        # - later: (replay_watermark, mimic_current_time]
         if self._replay_watermark is None:
             query = textwrap.dedent(
                 f"""
                 SELECT *
                 FROM {self.buffer_table_name}
-                WHERE {self.event_time_column} IS NOT NULL
-                    AND {self.event_time_column} >= ?
-                    AND {self.event_time_column} <= ?
-                ORDER BY {self.event_time_column} ASC
+                WHERE {self.event_time_column_utc} IS NOT NULL
+                    AND {self.event_time_column_utc} >= ?
+                    AND {self.event_time_column_utc} <= ?
+                ORDER BY {self.event_time_column_utc} ASC
                 """
             )
-            query_params = [self.mimic_service_start_time, mimic_current_time]
         else:
             query = textwrap.dedent(
                 f"""
                 SELECT *
                 FROM {self.buffer_table_name}
-                WHERE {self.event_time_column} IS NOT NULL
-                    AND {self.event_time_column} > ?
-                    AND {self.event_time_column} <= ?
-                ORDER BY {self.event_time_column} ASC
+                WHERE {self.event_time_column_utc} IS NOT NULL
+                    AND {self.event_time_column_utc} > ?
+                    AND {self.event_time_column_utc} <= ?
+                ORDER BY {self.event_time_column_utc} ASC
                 """
             )
-            query_params = [self._replay_watermark, mimic_current_time]
+        lower_bound, upper_bound = self._get_fetch_bounds(mimic_current_time)
+        query_params = [lower_bound, upper_bound]
 
         with duckdb.connect(self.buffer_db_path) as con:
+            if not self._table_exists(con, self.buffer_table_name):
+                logger.debug(
+                    "Buffer table does not exist yet | vehicle_type=%s | table_name=%s",
+                    self.vehicle_type,
+                    self.buffer_table_name,
+                )
+                return []
+
+            logger.debug(
+                "Normalized DuckDB query params | lower=%r (%s) | upper=%r (%s)",
+                query_params[0],
+                type(query_params[0]).__name__,
+                query_params[-1],
+                type(query_params[-1]).__name__,
+            )
+
             rows = con.execute(query, query_params).to_arrow_table().to_pylist()
+            # if rows were fetched, log a quick summary of the buffer table
+            if rows:
+                stats_query = textwrap.dedent(
+                    f"""
+                    SELECT
+                        MIN({self.event_time_column_utc}) AS min_event_time,
+                        MAX({self.event_time_column_utc}) AS max_event_time,
+                        COUNT(*) AS row_count
+                    FROM {self.buffer_table_name}
+                    WHERE {self.event_time_column_utc} IS NOT NULL
+                    """
+                )
+
+                stats_row = con.execute(stats_query).fetchone()
+
+                logger.debug(
+                    "Buffer table stats | vehicle_type=%s | min_event_time=%s | max_event_time=%s | row_count=%s",
+                    self.vehicle_type,
+                    stats_row[0],
+                    stats_row[1],
+                    stats_row[2],
+                )
 
         return rows
 
@@ -237,10 +368,20 @@ class KafkaReplayProducer:
             - number of rows published
             - maximum event time among the published rows
         """
+        logger.debug(
+            "Publish row batch | vehicle_type=%s | topic=%s | row_count=%d | first_event_time=%s | last_event_time=%s",
+            self.vehicle_type,
+            self.topic_name,
+            len(rows),
+            rows[0][self.event_time_column_utc],
+            rows[-1][self.event_time_column_utc],
+        )
 
         # since the input rows are sorted by time, the last row represents
         # the new highest watermark for this vehicle
-        max_event_time = rows[-1][self.event_time_column]
+        max_event_time = self._from_duckdb_timestamp_value(
+            rows[-1][self.event_time_column_utc]
+        )
         published_count = 0
 
         for row in rows:
@@ -279,6 +420,8 @@ class KafkaReplayProducer:
         serialized_row = {}
         for key, value in row.items():
             if isinstance(value, datetime):
+                if key.endswith("_utc") and value.tzinfo is None:
+                    value = value.replace(tzinfo=timezone.utc)
                 serialized_row[key] = value.isoformat()
             else:
                 serialized_row[key] = value
@@ -298,9 +441,9 @@ class KafkaReplayProducer:
         Returns:
             Kafka message key bytes, or `None` to publish without a key.
         """
-        # returning None utilizes Kafka's default 'sticky' partitioning strategy,
-        # ensuring an even load distribution across topic partitions.
-        return None  # use round-robin strategy for now
+        # returning None publishes without a key and lets the producer choose
+        # partitions using its default behavior.
+        return None  # publish without a key for now
 
     def _on_delivery(self, err, msg) -> None:
         """
@@ -312,11 +455,24 @@ class KafkaReplayProducer:
         """
         if err is not None:
             logger.warning(
-                f"Delivery failed for topic={msg.topic()} "
-                f"partition={msg.partition()} "
-                f"offset={msg.offset()} "
-                f"error={err}"
+                "Delivery failed | topic=%s | partition=%s | offset=%s | error=%s",
+                msg.topic(),
+                msg.partition(),
+                msg.offset(),
+                err,
             )
-        else:
-            # optional
-            pass
+
+    def close(self, timeout: float = 10.0) -> int:
+        """
+        Flush queued Kafka messages before shutdown.
+
+        Args:
+            timeout: Maximum number of seconds to wait for queued and in-flight
+                messages to be delivered.
+
+        Returns:
+            Number of messages still queued after the flush timeout expires.
+        """
+        # flush blocks until all messages currently in the producer's internal
+        # buffer are delivered or the timeout is reached
+        return self._producer.flush(timeout)

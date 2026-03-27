@@ -1,8 +1,13 @@
+import logging
 import re
+import textwrap
 from datetime import datetime, timedelta
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import duckdb
+
+logger = logging.getLogger(__name__)
 
 
 def _parse_window_size(window_size: str) -> timedelta:
@@ -105,12 +110,16 @@ def _parse_window_size(window_size: str) -> timedelta:
 
 
 class StreamingWindowBuffer:
+    """
+    Stage streaming windows for one vehicle type into a per-vehicle DuckDB buffer.
+    """
+
     def __init__(
         self,
         vehicle_type: str,
         resolved_runtime_config: dict,
         mimic_service_start_time: datetime,
-    ):
+    ) -> None:
         """
         Initialize a streaming window buffer for one vehicle type.
 
@@ -146,6 +155,7 @@ class StreamingWindowBuffer:
         self.event_time_column = resolved_runtime_config["serving"][
             "service_event_time_column_by_vehicle_type"
         ][vehicle_type]
+        self.event_time_column_utc = f"{self.event_time_column}_utc"
         self.vehicle_data_path = (
             Path(resolved_runtime_config["storage"]["target_base_path"]) / vehicle_type
         )
@@ -225,6 +235,20 @@ class StreamingWindowBuffer:
         except duckdb.CatalogException:
             return False
 
+    @staticmethod
+    def _to_nyc_local_timestamp_value(dt: datetime) -> datetime:
+        """
+        Convert an aware UTC datetime into a naive America/New_York datetime for
+        filtering against raw TLC event-time columns.
+
+        TLC parquet timestamps are stored without timezone information but are
+        interpreted as New York local time. This helper converts service-level UTC
+        window boundaries into naive New York local datetimes so the buffer query
+        selects the correct source rows.
+        """
+        nyc_dt = dt.astimezone(ZoneInfo("America/New_York"))
+        return nyc_dt.replace(tzinfo=None)
+
     def buffer_current_window(self) -> int:
         """
         Buffer one full streaming window of records into the DuckDB buffer table.
@@ -240,23 +264,38 @@ class StreamingWindowBuffer:
             Returns 0 if the window contains no matching records.
         """
         window_start, window_end = self.get_current_window()
+        window_start_local = self._to_nyc_local_timestamp_value(window_start)
+        window_end_local = self._to_nyc_local_timestamp_value(window_end)
 
         # define required info for query
         parquet_path = str(self.vehicle_data_path / "year=*" / "month=*" / "*.parquet")
-        window_start_str = window_start.strftime("%Y-%m-%d %H:%M:%S")
-        window_end_str = window_end.strftime("%Y-%m-%d %H:%M:%S")
 
         # query for data within the current window and save to the buffer table in the buffer database
+        # note: TLC event timestamps are stored as New York local time without timezone metadata.
+        # Filter source rows using that local-time column, and also materialize a UTC-normalized
+        # event-time column for downstream replay and watermark comparisons against the UTC-based ServiceClock.
         with duckdb.connect(str(self.buffer_db_path)) as con:
             # create a temp table to materialize the filtered data
-            con.execute(f"""
-                CREATE OR REPLACE TEMP TABLE temp_window AS
-                SELECT *
-                FROM read_parquet('{parquet_path}')
-                WHERE {self.event_time_column} >= TIMESTAMP '{window_start_str}'
-                AND {self.event_time_column} < TIMESTAMP '{window_end_str}'
-                ORDER BY {self.event_time_column} ASC
-            """)
+            query = textwrap.dedent(
+                f"""
+                    CREATE OR REPLACE TEMP TABLE temp_window AS
+                    SELECT 
+                        *,
+                        timezone(
+                            'UTC',
+                            timezone(
+                                'America/New_York',
+                                {self.event_time_column}
+                            )
+                        ) AS {self.event_time_column_utc}
+                    FROM read_parquet(?)
+                    WHERE {self.event_time_column} >= ?
+                    AND {self.event_time_column} < ?
+                    ORDER BY {self.event_time_column_utc} ASC
+                """
+            )
+            query_params = [parquet_path, window_start_local, window_end_local]
+            con.execute(query, query_params)
 
             # get count from the temp table (avoid scanning parquet files)
             row_count = con.execute("SELECT count(*) FROM temp_window").fetchone()[0]
@@ -264,7 +303,21 @@ class StreamingWindowBuffer:
             # if the window contains no records, still advance the window
             if row_count == 0:
                 self.advance_window(window_end)
+                # logger.debug(
+                #     "Buffer window | vehicle_type=%s | row_count=0 | window_start_inclusive=%s | window_end_exclusive=%s",
+                #     self.vehicle_type,
+                #     window_start,
+                #     window_end,
+                # )
                 return 0
+
+            logger.info(
+                "Buffer window | vehicle_type=%s | row_count=%d | window_start_inclusive=%s | window_end_exclusive=%s",
+                self.vehicle_type,
+                row_count,
+                window_start,
+                window_end,
+            )
 
             # persist matching records from temp table into the buffer table
             if self._table_exists(con, self.buffer_table_name):

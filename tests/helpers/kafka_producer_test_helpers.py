@@ -1,4 +1,5 @@
-from datetime import datetime
+from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -54,9 +55,10 @@ class CapturingLogger:
     def __init__(self) -> None:
         self.warning_messages: list[str] = []
 
-    def warning(self, message: str) -> None:
-        # capture the warning text so the test can verify the exact fields
-        # included in the delivery-failure log output
+    def warning(self, message: str, *args) -> None:
+        # mimic stdlib logging behavior for parameterized warning messages
+        if args:
+            message = message % args
         self.warning_messages.append(message)
 
 
@@ -106,3 +108,10 @@ def create_buffer_table_and_insert_rows(
     with duckdb.connect(producer.buffer_db_path) as con:
         con.execute(create_table_sql)
         con.execute(insert_sql, insert_sql_params)
+
+
+def nyc_local_to_utc_naive(dt_local: datetime) -> datetime:
+    """Convert naive America/New_York datetime to naive UTC datetime."""
+    aware_local = dt_local.replace(tzinfo=ZoneInfo("America/New_York"))
+    aware_utc = aware_local.astimezone(timezone.utc)
+    return aware_utc.replace(tzinfo=None)

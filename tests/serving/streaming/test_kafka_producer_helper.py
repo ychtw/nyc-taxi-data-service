@@ -1,5 +1,5 @@
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 
 import pytest
 
@@ -32,11 +32,17 @@ def test_publish_rows_produces_each_row_and_returns_count_and_max_event_time(
     rows = [
         {
             "vendor_id": 1,
-            "tpep_dropoff_datetime": datetime(2025, 3, 1, 0, 5, 0),
+            "tpep_dropoff_datetime": datetime(2025, 3, 1, 5, 5, 0),
+            "tpep_dropoff_datetime_utc": datetime(
+                2025, 3, 1, 0, 5, 0, tzinfo=timezone.utc
+            ),
         },
         {
             "vendor_id": 2,
-            "tpep_dropoff_datetime": datetime(2025, 3, 1, 0, 10, 0),
+            "tpep_dropoff_datetime": datetime(2025, 3, 1, 5, 10, 0),
+            "tpep_dropoff_datetime_utc": datetime(
+                2025, 3, 1, 0, 10, 0, tzinfo=timezone.utc
+            ),
         },
     ]
 
@@ -106,7 +112,7 @@ def test_publish_rows_produces_each_row_and_returns_count_and_max_event_time(
 
     # verify the method reports replay progress based on the input rows
     assert published_count == 2
-    assert max_event_time == datetime(2025, 3, 1, 0, 10, 0)
+    assert max_event_time == datetime(2025, 3, 1, 0, 10, 0, tzinfo=timezone.utc)
 
 
 def test_publish_rows_polls_after_each_produce_and_flushes_once(
@@ -131,15 +137,24 @@ def test_publish_rows_polls_after_each_produce_and_flushes_once(
     rows = [
         {
             "vendor_id": 10,
-            "lpep_dropoff_datetime": datetime(2025, 3, 1, 0, 2, 0),
+            "lpep_dropoff_datetime": datetime(2025, 3, 1, 5, 2, 0),
+            "lpep_dropoff_datetime_utc": datetime(
+                2025, 3, 1, 0, 2, 0, tzinfo=timezone.utc
+            ),
         },
         {
             "vendor_id": 20,
-            "lpep_dropoff_datetime": datetime(2025, 3, 1, 0, 4, 0),
+            "lpep_dropoff_datetime": datetime(2025, 3, 1, 5, 4, 0),
+            "lpep_dropoff_datetime_utc": datetime(
+                2025, 3, 1, 0, 4, 0, tzinfo=timezone.utc
+            ),
         },
         {
             "vendor_id": 30,
-            "lpep_dropoff_datetime": datetime(2025, 3, 1, 0, 6, 0),
+            "lpep_dropoff_datetime": datetime(2025, 3, 1, 5, 6, 0),
+            "lpep_dropoff_datetime_utc": datetime(
+                2025, 3, 1, 0, 6, 0, tzinfo=timezone.utc
+            ),
         },
     ]
 
@@ -211,11 +226,13 @@ def test_publish_rows_passes_rows_to_key_and_serializer_helpers_in_order(
     rows = [
         {
             "dispatching_base_num": "B1",
-            "dropOff_datetime": datetime(2025, 3, 1, 0, 1, 0),
+            "dropOff_datetime": datetime(2025, 3, 1, 5, 1, 0),
+            "dropOff_datetime_utc": datetime(2025, 3, 1, 0, 1, 0, tzinfo=timezone.utc),
         },
         {
             "dispatching_base_num": "B2",
-            "dropOff_datetime": datetime(2025, 3, 1, 0, 3, 0),
+            "dropOff_datetime": datetime(2025, 3, 1, 5, 3, 0),
+            "dropOff_datetime_utc": datetime(2025, 3, 1, 0, 3, 0, tzinfo=timezone.utc),
         },
     ]
 
@@ -412,3 +429,30 @@ def test_build_message_key_returns_none(
 
     # verify the current implementation always publishes without a key
     assert producer._build_message_key(row) is None
+
+
+def test_serialize_record_adds_utc_offset_to_naive_utc_datetime_fields(
+    monkeypatch: pytest.MonkeyPatch,
+    resolved_runtime_config: dict,
+    mimic_service_start_time: datetime,
+) -> None:
+    """Serialize naive *_utc datetime fields with an explicit +00:00 offset."""
+    producer = build_producer(
+        monkeypatch=monkeypatch,
+        resolved_runtime_config=resolved_runtime_config,
+        vehicle_type="yellow",
+        mimic_service_start_time=mimic_service_start_time,
+    )
+
+    row = {
+        "vendor_id": 1,
+        "tpep_dropoff_datetime_utc": datetime(2025, 3, 1, 0, 5, 30),
+    }
+
+    serialized = producer._serialize_record(row)
+    decoded = json.loads(serialized.decode("utf-8"))
+
+    assert decoded == {
+        "vendor_id": 1,
+        "tpep_dropoff_datetime_utc": "2025-03-01T00:05:30+00:00",
+    }

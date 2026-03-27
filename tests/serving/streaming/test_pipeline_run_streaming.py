@@ -1,5 +1,7 @@
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from unittest.mock import Mock, call
+
+import pytest
 
 from nyc_taxi_data_service.serving.streaming.pipeline import run_streaming
 from tests.helpers.streaming_pipeline_test_helpers import (
@@ -63,7 +65,7 @@ def test_run_streaming_ensures_topics_builds_components_and_runs_startup_steps(
 
     run_streaming(resolved_runtime_config)
 
-    mock_service_clock_cls.assert_called_once_with(mimic_current_date="2025-01-15")
+    mock_service_clock_cls.assert_called_once_with(mimic_current_date=date(2025, 1, 15))
     mock_ensure_topics.assert_called_once_with(
         vehicle_types=["yellow", "green"],
         resolved_runtime_config=resolved_runtime_config,
@@ -276,20 +278,27 @@ def test_run_streaming_buffers_additional_window_when_not_half_window_ahead(
         "nyc_taxi_data_service.serving.streaming.pipeline._run_initial_buffering"
     )
     mocker.patch("nyc_taxi_data_service.serving.streaming.pipeline._run_publish_cycle")
-    mock_datetime = mocker.patch(
-        "nyc_taxi_data_service.serving.streaming.pipeline.datetime"
-    )
+    real_datetime = datetime
+    mock_datetime = Mock(wraps=real_datetime)
     mock_datetime.now.side_effect = [
-        datetime(2025, 1, 15, 8, 0, tzinfo=timezone.utc),  # initial next_publish_at
-        datetime(2025, 1, 15, 8, 1, tzinfo=timezone.utc),  # now inside loop
+        datetime(2025, 1, 15, 8, 0, tzinfo=timezone.utc),
+        datetime(2025, 1, 15, 8, 1, tzinfo=timezone.utc),
     ]
-    mocker.patch("nyc_taxi_data_service.serving.streaming.pipeline.time.sleep")
+    mocker.patch(
+        "nyc_taxi_data_service.serving.streaming.pipeline.datetime",
+        mock_datetime,
+    )
+
+    mock_sleep = mocker.patch(
+        "nyc_taxi_data_service.serving.streaming.pipeline.time.sleep"
+    )
 
     resolved_runtime_config["vehicle_types"] = ["yellow"]
 
     run_streaming(resolved_runtime_config)
 
     window_buffer.buffer_current_window.assert_called_once_with()
+    mock_sleep.assert_called_once()
 
 
 def test_run_streaming_does_not_buffer_when_next_window_is_far_enough_ahead(
@@ -345,17 +354,43 @@ def test_run_streaming_does_not_buffer_when_next_window_is_far_enough_ahead(
         "nyc_taxi_data_service.serving.streaming.pipeline._run_initial_buffering"
     )
     mocker.patch("nyc_taxi_data_service.serving.streaming.pipeline._run_publish_cycle")
-    mock_datetime = mocker.patch(
-        "nyc_taxi_data_service.serving.streaming.pipeline.datetime"
-    )
+    real_datetime = datetime
+    mock_datetime = Mock(wraps=real_datetime)
     mock_datetime.now.side_effect = [
         datetime(2025, 1, 15, 8, 0, tzinfo=timezone.utc),
         datetime(2025, 1, 15, 8, 1, tzinfo=timezone.utc),
     ]
-    mocker.patch("nyc_taxi_data_service.serving.streaming.pipeline.time.sleep")
+
+    mocker.patch(
+        "nyc_taxi_data_service.serving.streaming.pipeline.datetime",
+        mock_datetime,
+    )
+
+    mock_sleep = mocker.patch(
+        "nyc_taxi_data_service.serving.streaming.pipeline.time.sleep"
+    )
 
     resolved_runtime_config["vehicle_types"] = ["yellow"]
 
     run_streaming(resolved_runtime_config)
 
     window_buffer.buffer_current_window.assert_not_called()
+    mock_sleep.assert_called_once()
+
+
+def test_run_streaming_raises_for_invalid_mimic_current_date(mocker) -> None:
+    """Raise ValueError when mimic_current_date is not a valid ISO date string."""
+    resolved_runtime_config = build_resolved_runtime_config_for_run_streaming()
+    resolved_runtime_config["serving"]["mimic_current_date"] = "2025/01/15"
+
+    mocker.patch(
+        "nyc_taxi_data_service.serving.streaming.pipeline._build_stream_exhaustion_boundary",
+        return_value=datetime(2025, 2, 1, tzinfo=timezone.utc),
+    )
+    mocker.patch(
+        "nyc_taxi_data_service.serving.streaming.pipeline._resolve_stream_timing_config",
+        return_value=(timedelta(minutes=30), timedelta(seconds=5)),
+    )
+
+    with pytest.raises(ValueError):
+        run_streaming(resolved_runtime_config)

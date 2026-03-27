@@ -1,7 +1,7 @@
 import logging
 import re
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 
 from nyc_taxi_data_service.config.config_loader import (
     load_runtime_config,
@@ -136,6 +136,12 @@ def _resolve_stream_timing_config(
     buffer_config = resolved_runtime_config["serving"]["streaming"]["buffer"]
     kafka_config = resolved_runtime_config["serving"]["streaming"]["kafka"]
 
+    logger.info(
+        "Streaming timing config | window_size=%s | publish_interval=%s",
+        buffer_config["window_size"],
+        kafka_config["publish_interval"],
+    )
+
     window_size = _parse_window_size(buffer_config["window_size"])
     publish_interval = _parse_publish_interval(
         publish_interval=kafka_config["publish_interval"],
@@ -167,6 +173,7 @@ def _build_streaming_components(
         A tuple of:
             (window_buffer, replay_producer)
     """
+    logger.info("Build streaming components | vehicle_type=%s", vehicle_type)
 
     window_buffer = StreamingWindowBuffer(
         vehicle_type=vehicle_type,
@@ -192,6 +199,8 @@ def _run_initial_buffering(
     Each StreamingWindowBuffer loads its first window of data so that the
     replay producers can begin publishing immediately after startup.
     """
+    logger.info("Initial buffering")
+
     for window_buffer in window_buffers.values():
         window_buffer.buffer_current_window()
 
@@ -206,6 +215,11 @@ def _run_publish_cycle(
     Each KafkaReplayProducer checks its buffer and sends any rows whose
     event time is less than or equal to the provided mimic timestamp.
     """
+    logger.debug(
+        "Publish cycle | mimic_current_time=%s | vehicle_types=%s",
+        mimic_current_time,
+        list(replay_producers),
+    )
     for replay_producer in replay_producers.values():
         replay_producer.publish_available(mimic_current_time=mimic_current_time)
 
@@ -274,9 +288,11 @@ def run_streaming(resolved_runtime_config: dict) -> None:
     On shutdown, all replay producers are closed so queued Kafka messages
     are flushed before exit.
     """
+    logger.info("Starting NYC taxi data streaming service")
 
     # build the upper bound time (exclusive) of streaming service
     stream_end_time = _build_stream_exhaustion_boundary(resolved_runtime_config)
+    logger.debug("Streaming upper bound (exclusive): %s", stream_end_time)
 
     # get 2 timing controls used by the streaming service:
     # - window_size: how much source data each buffer-fill query stages into DuckDB
@@ -287,15 +303,23 @@ def run_streaming(resolved_runtime_config: dict) -> None:
     publish_interval_seconds = publish_interval.total_seconds()
 
     # mimic_current_date anchors the service's mimic timeline
-    mimic_current_date = resolved_runtime_config["serving"]["mimic_current_date"]
+    mimic_current_date = date.fromisoformat(
+        resolved_runtime_config["serving"]["mimic_current_date"]
+    )
+    logger.info("Mimic current date: %s", mimic_current_date)
 
     # create one shared `ServiceClock` for the whole streaming service
     # & derive mimic_service_start_time
     service_clock = ServiceClock(mimic_current_date=mimic_current_date)
     mimic_service_start_time = service_clock.mimic_service_start_time
+    logger.info(
+        "Service clock started | mimic_service_start_time=%s",
+        mimic_service_start_time,
+    )
 
     # configure vehicle types for this streaming run
     vehicle_types = resolved_runtime_config["vehicle_types"]
+    logger.info("Configured vehicle types: %s", vehicle_types)
 
     # create dictionaries to hold per-vehicle runtime objects
     # initialize these before `try` so `finally` can always access them,
@@ -325,6 +349,7 @@ def run_streaming(resolved_runtime_config: dict) -> None:
         # this lets the service publish any buffered rows that are
         # already eligible at the current mimic time
         _run_initial_buffering(window_buffers=window_buffers)
+        logger.info("Initial publish")
         _run_publish_cycle(
             replay_producers=replay_producers,
             mimic_current_time=service_clock.now(),
@@ -364,11 +389,24 @@ def run_streaming(resolved_runtime_config: dict) -> None:
                     if window_start - mimic_current_time > window_size / 2:
                         # next window start is more than half a window in the future, skip buffering
                         break
+                    logger.debug(
+                        "Buffer-ahead check triggered buffering | vehicle_type=%s | mimic_current_time=%s | next_window_start=%s",
+                        window_buffer.vehicle_type,
+                        mimic_current_time,
+                        window_start,
+                    )
                     window_buffer.buffer_current_window()
 
             # publish buffered rows on schedule
             now = datetime.now(timezone.utc)
             if now >= next_publish_at:
+                logger.debug(
+                    "Scheduled publish triggered | now=%s | next_publish_at=%s | mimic_current_time=%s",
+                    now,
+                    next_publish_at,
+                    mimic_current_time,
+                )
+
                 # note: one publish cycle already attempts to send all rows eligible up to `mimic_current_time`
                 _run_publish_cycle(
                     replay_producers=replay_producers,
@@ -388,6 +426,7 @@ def run_streaming(resolved_runtime_config: dict) -> None:
                     publish_interval_seconds / 2,
                 ),
             )
+            # logger.debug("Sleep %.3f seconds", sleep_seconds)
             time.sleep(sleep_seconds)
 
     finally:

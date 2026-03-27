@@ -1,5 +1,5 @@
 import types
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -44,7 +44,7 @@ def resolved_runtime_config(tmp_path: Path) -> dict:
 
 @pytest.fixture
 def mimic_service_start_time() -> datetime:
-    return datetime(2025, 3, 1, 0, 0, 0)
+    return datetime(2025, 3, 1, 0, 0, 0, tzinfo=timezone.utc)
 
 
 @pytest.fixture
