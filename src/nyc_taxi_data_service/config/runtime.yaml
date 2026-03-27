@@ -22,7 +22,56 @@ defaults:
       green: "lpep_dropoff_datetime"
       fhv: "dropOff_datetime"
       fhvhv: "dropoff_datetime"
+    streaming:
+        # `buffer`: settings that control how data is staged from Parquet
+        # to DuckDB before downstream replay/publishing into Kafka topics
+        buffer:
+          # `window_size`: time span covered by each buffer-fill query
+          # - format: "<integer><unit>" (no spaces)
+          # - allowed units: m=minutes, h=hours, d=days
+          # - valid range: 1m to 1d
+          # - seconds and float values are not supported
+          window_size: "1m"
+          # `retention`: how long rows are kept in the DuckDB buffer
+          # before they become eligible for deletion
+          # - format: "<integer><unit>" (no spaces)
+          # - allowed units: m=minutes, h=hours, d=days
+          # - valid range: 1m to 1d
+          # - must be >= window_size
+          retention: "1m"
+          # DuckDB staging database location
+          db_base_path: "data/stream_buffer"
+          # table name inside the DuckDB buffer database
+          db_table_name: "buffered_data"
 
+        kafka:
+          # client connection settings (bootstrap, security, etc.)
+          client:
+            bootstrap_servers: "localhost:9092"
+            client_id: "nyc-taxi-data-service"
+            # security_protocol: "PLAINTEXT" (add if moving to EC2/SSL later)
+
+          # topic metadata and infrastructure defaults
+          topic:
+            prefix: "nyc_taxi"
+            num_partitions: 3
+            replication_factor: 1 # set to 1 for local testing
+            retention_ms: 86400000 # 24 hours
+
+          # producer behavior settings
+          producer:
+            acks: "all"
+            linger_ms: 0
+            batch_size: 65536
+            compression_type: "snappy"
+
+          # `publish_interval`: how often buffered records are replayed to Kafka
+          # - format: "<integer><unit>" (no spaces)
+          # - allowed units: s=seconds, m=minutes, h=hours
+          # - must be >= 1s
+          # - must be <= streaming.buffer.window_size
+          # - smaller values make the stream feel more real-time
+          publish_interval: "5s"
 
 environments:
   dev:
@@ -43,8 +92,8 @@ environments:
     vehicle_types:
       - yellow
       - green
-      # - fhv
-      # - fhvhv
+      - fhv
+      - fhvhv
 
     serving:
       mimic_current_date: "2025-01-15"
