@@ -149,37 +149,85 @@ def test_parse_publish_interval_raises_when_greater_than_window_size(
 
 
 @pytest.mark.parametrize(
-    ("window_size", "publish_interval", "expected_window", "expected_publish"),
+    (
+        "window_size",
+        "retention",
+        "publish_interval",
+        "expected_window",
+        "expected_retention",
+        "expected_publish",
+    ),
     [
-        ("30m", "5s", timedelta(minutes=30), timedelta(seconds=5)),
-        ("1h", "30s", timedelta(hours=1), timedelta(seconds=30)),
-        ("1d", "1h", timedelta(days=1), timedelta(hours=1)),
-        ("15m", "15m", timedelta(minutes=15), timedelta(minutes=15)),
+        (
+            "30m",
+            "30m",
+            "5s",
+            timedelta(minutes=30),
+            timedelta(minutes=30),
+            timedelta(seconds=5),
+        ),
+        (
+            "1h",
+            "1h",
+            "30s",
+            timedelta(hours=1),
+            timedelta(hours=1),
+            timedelta(seconds=30),
+        ),
+        (
+            "1d",
+            "1d",
+            "1h",
+            timedelta(days=1),
+            timedelta(days=1),
+            timedelta(hours=1),
+        ),
+        (
+            "15m",
+            "15m",
+            "15m",
+            timedelta(minutes=15),
+            timedelta(minutes=15),
+            timedelta(minutes=15),
+        ),
+        (
+            "15m",
+            "30m",
+            "5s",
+            timedelta(minutes=15),
+            timedelta(minutes=30),
+            timedelta(seconds=5),
+        ),
     ],
     ids=[
         "minutes-window-seconds-publish",
         "hours-window-seconds-publish",
         "days-window-hours-publish",
         "equal-window-and-publish",
+        "retention-greater-than-window",
     ],
 )
-def test_resolve_stream_timing_config_parses_window_size_and_publish_interval(
+def test_resolve_stream_timing_config_parses_window_retention_and_publish_interval(
     window_size: str,
+    retention: str,
     publish_interval: str,
     expected_window: timedelta,
+    expected_retention: timedelta,
     expected_publish: timedelta,
 ) -> None:
-    """Resolve and parse both timing settings from runtime config."""
+    """Resolve and parse all streaming timing settings from runtime config."""
     resolved_runtime_config = build_minimal_resolved_runtime_config(
         window_size=window_size,
+        retention=retention,
         publish_interval=publish_interval,
     )
 
-    actual_window, actual_publish = _resolve_stream_timing_config(
+    actual_window, actual_retention, actual_publish = _resolve_stream_timing_config(
         resolved_runtime_config
     )
 
     assert actual_window == expected_window
+    assert actual_retention == expected_retention
     assert actual_publish == expected_publish
 
 
@@ -206,11 +254,62 @@ def test_resolve_stream_timing_config_raises_for_invalid_window_size(
     """Raise ValueError when window_size cannot be parsed or validated."""
     resolved_runtime_config = build_minimal_resolved_runtime_config(
         window_size=window_size,
+        retention="30m",
         publish_interval="5s",
     )
 
     with pytest.raises(ValueError):
         _resolve_stream_timing_config(resolved_runtime_config)
+
+
+@pytest.mark.parametrize(
+    "retention",
+    [
+        "0m",
+        "30s",
+        "1w",
+        "bad",
+        "",
+    ],
+    ids=[
+        "too-short",
+        "seconds-not-supported",
+        "unsupported-unit",
+        "invalid-format",
+        "empty-string",
+    ],
+)
+def test_resolve_stream_timing_config_raises_for_invalid_retention(
+    retention: str,
+) -> None:
+    """Raise ValueError when retention cannot be parsed or validated."""
+    resolved_runtime_config = build_minimal_resolved_runtime_config(
+        window_size="30m",
+        retention=retention,
+        publish_interval="5s",
+    )
+
+    with pytest.raises(ValueError):
+        _resolve_stream_timing_config(resolved_runtime_config)
+
+
+def test_resolve_stream_timing_config_parses_retention_even_when_shorter_than_window_size() -> (
+    None
+):
+    """Parse timing values without enforcing the retention/window_size relationship."""
+    resolved_runtime_config = build_minimal_resolved_runtime_config(
+        window_size="30m",
+        retention="15m",
+        publish_interval="5s",
+    )
+
+    actual_window, actual_retention, actual_publish = _resolve_stream_timing_config(
+        resolved_runtime_config
+    )
+
+    assert actual_window == timedelta(minutes=30)
+    assert actual_retention == timedelta(minutes=15)
+    assert actual_publish == timedelta(seconds=5)
 
 
 @pytest.mark.parametrize(
@@ -234,6 +333,7 @@ def test_resolve_stream_timing_config_raises_for_invalid_publish_interval(
     """Raise ValueError when publish_interval cannot be parsed or validated."""
     resolved_runtime_config = build_minimal_resolved_runtime_config(
         window_size="30m",
+        retention="30m",
         publish_interval=publish_interval,
     )
 

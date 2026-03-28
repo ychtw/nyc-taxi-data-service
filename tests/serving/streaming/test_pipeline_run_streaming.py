@@ -9,15 +9,28 @@ from tests.helpers.streaming_pipeline_test_helpers import (
 )
 
 
+@pytest.fixture
+def window_size() -> timedelta:
+    return timedelta(minutes=30)
+
+
+@pytest.fixture
+def retention() -> timedelta:
+    return timedelta(minutes=30)
+
+
+@pytest.fixture
+def publish_interval() -> timedelta:
+    return timedelta(seconds=5)
+
+
 def test_run_streaming_ensures_topics_builds_components_and_runs_startup_steps(
-    mocker,
+    mocker, window_size, retention, publish_interval
 ) -> None:
     """Ensure startup creates topics, builds components, buffers, and publishes."""
     resolved_runtime_config = build_resolved_runtime_config_for_run_streaming()
 
     stream_end_time = datetime(2025, 2, 1, tzinfo=timezone.utc)
-    window_size = timedelta(minutes=30)
-    publish_interval = timedelta(seconds=5)
 
     mocker.patch(
         "nyc_taxi_data_service.serving.streaming.pipeline._build_stream_exhaustion_boundary",
@@ -25,7 +38,7 @@ def test_run_streaming_ensures_topics_builds_components_and_runs_startup_steps(
     )
     mocker.patch(
         "nyc_taxi_data_service.serving.streaming.pipeline._resolve_stream_timing_config",
-        return_value=(window_size, publish_interval),
+        return_value=(window_size, retention, publish_interval),
     )
 
     mock_service_clock = Mock()
@@ -91,7 +104,7 @@ def test_run_streaming_ensures_topics_builds_components_and_runs_startup_steps(
 
 
 def test_run_streaming_runs_final_publish_when_stream_is_exhausted(
-    mocker,
+    mocker, window_size, retention, publish_interval
 ) -> None:
     """Run one final publish cycle before shutdown when mimic time reaches the end."""
     resolved_runtime_config = build_resolved_runtime_config_for_run_streaming()
@@ -103,7 +116,7 @@ def test_run_streaming_runs_final_publish_when_stream_is_exhausted(
     )
     mocker.patch(
         "nyc_taxi_data_service.serving.streaming.pipeline._resolve_stream_timing_config",
-        return_value=(timedelta(minutes=30), timedelta(seconds=5)),
+        return_value=(window_size, retention, publish_interval),
     )
 
     mock_service_clock = Mock()
@@ -161,7 +174,7 @@ def test_run_streaming_runs_final_publish_when_stream_is_exhausted(
 
 
 def test_run_streaming_closes_all_replay_producers_in_finally(
-    mocker,
+    mocker, window_size, retention, publish_interval
 ) -> None:
     """Close every replay producer during shutdown."""
     resolved_runtime_config = build_resolved_runtime_config_for_run_streaming()
@@ -173,7 +186,7 @@ def test_run_streaming_closes_all_replay_producers_in_finally(
     )
     mocker.patch(
         "nyc_taxi_data_service.serving.streaming.pipeline._resolve_stream_timing_config",
-        return_value=(timedelta(minutes=30), timedelta(seconds=5)),
+        return_value=(window_size, retention, publish_interval),
     )
 
     mock_service_clock = Mock()
@@ -217,13 +230,11 @@ def test_run_streaming_closes_all_replay_producers_in_finally(
 
 
 def test_run_streaming_does_not_buffer_when_next_window_is_far_enough_ahead(
-    mocker,
+    mocker, window_size, retention, publish_interval
 ) -> None:
     """Skip buffering when the next window start is more than half a window ahead."""
     resolved_runtime_config = build_resolved_runtime_config_for_run_streaming()
 
-    window_size = timedelta(minutes=30)
-    publish_interval = timedelta(seconds=5)
     stream_end_time = datetime(2025, 1, 15, 9, 0, tzinfo=timezone.utc)
     first_loop_mimic_time = datetime(2025, 1, 15, 8, 10, tzinfo=timezone.utc)
 
@@ -233,7 +244,7 @@ def test_run_streaming_does_not_buffer_when_next_window_is_far_enough_ahead(
     )
     mocker.patch(
         "nyc_taxi_data_service.serving.streaming.pipeline._resolve_stream_timing_config",
-        return_value=(window_size, publish_interval),
+        return_value=(window_size, retention, publish_interval),
     )
 
     mock_service_clock = Mock()
@@ -293,7 +304,9 @@ def test_run_streaming_does_not_buffer_when_next_window_is_far_enough_ahead(
     mock_sleep.assert_called_once()
 
 
-def test_run_streaming_raises_for_invalid_mimic_current_date(mocker) -> None:
+def test_run_streaming_raises_for_invalid_mimic_current_date(
+    mocker, window_size, retention, publish_interval
+) -> None:
     """Raise ValueError when mimic_current_date is not a valid ISO date string."""
     resolved_runtime_config = build_resolved_runtime_config_for_run_streaming()
     resolved_runtime_config["serving"]["mimic_current_date"] = "2025/01/15"
@@ -304,7 +317,7 @@ def test_run_streaming_raises_for_invalid_mimic_current_date(mocker) -> None:
     )
     mocker.patch(
         "nyc_taxi_data_service.serving.streaming.pipeline._resolve_stream_timing_config",
-        return_value=(timedelta(minutes=30), timedelta(seconds=5)),
+        return_value=(window_size, retention, publish_interval),
     )
 
     with pytest.raises(ValueError):
@@ -312,13 +325,11 @@ def test_run_streaming_raises_for_invalid_mimic_current_date(mocker) -> None:
 
 
 def test_run_streaming_buffers_and_deletes_expired_rows_when_not_half_window_ahead(
-    mocker,
+    mocker, window_size, retention, publish_interval
 ) -> None:
     """Buffer another window and run retention cleanup when not far enough ahead."""
     resolved_runtime_config = build_resolved_runtime_config_for_run_streaming()
 
-    window_size = timedelta(minutes=30)
-    publish_interval = timedelta(seconds=5)
     stream_end_time = datetime(2025, 1, 15, 9, 0, tzinfo=timezone.utc)
     first_loop_mimic_time = datetime(2025, 1, 15, 8, 20, tzinfo=timezone.utc)
 
@@ -328,7 +339,7 @@ def test_run_streaming_buffers_and_deletes_expired_rows_when_not_half_window_ahe
     )
     mocker.patch(
         "nyc_taxi_data_service.serving.streaming.pipeline._resolve_stream_timing_config",
-        return_value=(window_size, publish_interval),
+        return_value=(window_size, retention, publish_interval),
     )
 
     mock_service_clock = Mock()
@@ -401,13 +412,11 @@ def test_run_streaming_buffers_and_deletes_expired_rows_when_not_half_window_ahe
 
 
 def test_run_streaming_does_not_delete_expired_rows_when_buffering_is_skipped(
-    mocker,
+    mocker, window_size, retention, publish_interval
 ) -> None:
     """Skip retention cleanup when the next window is already far enough ahead."""
     resolved_runtime_config = build_resolved_runtime_config_for_run_streaming()
 
-    window_size = timedelta(minutes=30)
-    publish_interval = timedelta(seconds=5)
     stream_end_time = datetime(2025, 1, 15, 9, 0, tzinfo=timezone.utc)
     first_loop_mimic_time = datetime(2025, 1, 15, 8, 10, tzinfo=timezone.utc)
 
@@ -417,7 +426,7 @@ def test_run_streaming_does_not_delete_expired_rows_when_buffering_is_skipped(
     )
     mocker.patch(
         "nyc_taxi_data_service.serving.streaming.pipeline._resolve_stream_timing_config",
-        return_value=(window_size, publish_interval),
+        return_value=(window_size, retention, publish_interval),
     )
 
     mock_service_clock = Mock()
@@ -479,13 +488,14 @@ def test_run_streaming_does_not_delete_expired_rows_when_buffering_is_skipped(
 
 
 def test_run_streaming_deletes_expired_rows_after_each_buffer_fill_when_catching_up(
-    mocker,
+    mocker, window_size, retention, publish_interval
 ) -> None:
     """Run retention cleanup after each buffer fill when the buffer loop catches up."""
     resolved_runtime_config = build_resolved_runtime_config_for_run_streaming()
     resolved_runtime_config["vehicle_types"] = ["yellow"]
 
     window_size = timedelta(minutes=30)
+    retention = timedelta(minutes=30)
     publish_interval = timedelta(seconds=5)
     stream_end_time = datetime(2025, 1, 15, 10, 0, tzinfo=timezone.utc)
     first_loop_mimic_time = datetime(2025, 1, 15, 8, 40, tzinfo=timezone.utc)
@@ -496,7 +506,7 @@ def test_run_streaming_deletes_expired_rows_after_each_buffer_fill_when_catching
     )
     mocker.patch(
         "nyc_taxi_data_service.serving.streaming.pipeline._resolve_stream_timing_config",
-        return_value=(window_size, publish_interval),
+        return_value=(window_size, retention, publish_interval),
     )
 
     mock_service_clock = Mock()
