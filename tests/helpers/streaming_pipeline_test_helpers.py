@@ -1,5 +1,6 @@
 def build_minimal_resolved_runtime_config(
     window_size: str = "30m",
+    retention: str = "30m",
     publish_interval: str = "5s",
 ) -> dict:
     """Build a minimal resolved runtime config for stream timing tests."""
@@ -8,6 +9,7 @@ def build_minimal_resolved_runtime_config(
             "streaming": {
                 "buffer": {
                     "window_size": window_size,
+                    "retention": retention,
                 },
                 "kafka": {
                     "publish_interval": publish_interval,
