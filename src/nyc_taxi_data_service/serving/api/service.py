@@ -1,5 +1,5 @@
 import textwrap
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 import duckdb
@@ -66,10 +66,51 @@ class HistoricalApiService:
         )
         return parquet_path
 
+    def normalize_request_datetime(self, dt: datetime, field_name: str) -> datetime:
+        """
+        Normalize a request datetime to a timezone-aware UTC datetime.
+
+        Naive datetimes are interpreted as UTC for the current API implementation.
+
+        Args:
+            dt: Datetime provided by the API request.
+            field_name: Name of the request field, used in error messages.
+
+        Returns:
+            A timezone-aware UTC datetime.
+
+        Raises:
+            HTTPException: If the datetime is timezone-aware but not in UTC and you
+                choose to reject non-UTC input.
+        """
+        if dt.tzinfo is None:
+            return dt.replace(tzinfo=timezone.utc)
+
+        return dt.astimezone(timezone.utc)
+
+    def get_available_through(self, mimic_current_time: datetime) -> datetime:
+        """
+        Return the latest timestamp currently available through the API.
+
+        For the initial implementation, the API exposes data up to the supplied
+        mimic current time. Later, this method can apply a release cadence such
+        as daily, hourly, or every 15 minutes.
+
+        Args:
+            mimic_current_time: The current service time supplied by the outer
+                service loop.
+
+        Returns:
+            The latest timestamp that API requests are allowed to access.
+        """
+        # use mimic_current_time for now, and later adapt to different service cadence to be more realistic
+        return mimic_current_time
+
     def validate_request_window(
         self,
         start_time: datetime,
         end_time: datetime,
+        available_through: datetime,
         limit: int,
     ) -> None:
         """
@@ -78,11 +119,13 @@ class HistoricalApiService:
         Args:
             start_time: Inclusive lower bound for the request window.
             end_time: Exclusive upper bound for the request window.
+            available_through: Latest timestamp currently available through the API.
             limit: Maximum number of rows requested.
 
         Raises:
-            HTTPException: If the time window is invalid or the limit is not
-                positive.
+            HTTPException: If the time window is invalid, the requested limit is not
+                positive, or the requested end_time exceeds the currently available
+                API range.
         """
         # enforce a valid half-open time window before querying data
         if start_time >= end_time:
@@ -94,12 +137,22 @@ class HistoricalApiService:
         if limit <= 0:
             raise HTTPException(status_code=400, detail="limit must be positive")
 
+        if end_time > available_through:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "end_time exceeds currently available API range: "
+                    f"{available_through.isoformat()}"
+                ),
+            )
+
     def get_trips(
         self,
         vehicle_type: str,
         start_time: datetime,
         end_time: datetime,
         limit: int,
+        mimic_current_time: datetime,
         con: duckdb.DuckDBPyConnection,
     ) -> dict:
         """
@@ -117,6 +170,8 @@ class HistoricalApiService:
             start_time: Inclusive lower bound for the event-time filter.
             end_time: Exclusive upper bound for the event-time filter.
             limit: Maximum number of rows to return.
+            mimic_current_time: Current mimic service time used to derive the
+                API availability boundary.
             con: DuckDB connection used to execute the query.
 
         Returns:
@@ -125,8 +180,14 @@ class HistoricalApiService:
         """
 
         # validate request inputs
+        start_time = self.normalize_request_datetime(start_time, "start_time")
+        end_time = self.normalize_request_datetime(end_time, "end_time")
+        available_through = self.get_available_through(mimic_current_time)
         self.validate_request_window(
-            start_time=start_time, end_time=end_time, limit=limit
+            start_time=start_time,
+            end_time=end_time,
+            available_through=available_through,
+            limit=limit,
         )
 
         # gather required info for the query
@@ -157,5 +218,6 @@ class HistoricalApiService:
             "start_time": start_time,
             "end_time": end_time,
             "limit": limit,
+            "mimic_current_time": mimic_current_time,
             "rows": rows,
         }

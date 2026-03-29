@@ -1,26 +1,24 @@
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 import polars as pl
 import pytest
 from fastapi.testclient import TestClient
 
-from nyc_taxi_data_service.serving.api.app import (
-    app,
-    get_api_service,
-    get_resolved_runtime_config,
-)
+from nyc_taxi_data_service.serving.api.app import app
 from nyc_taxi_data_service.serving.api.service import HistoricalApiService
 
 
-@pytest.fixture
-def client():
+class DummyClock:
     """
-    Create a TestClient and clear dependency overrides after the test.
+    Return a fixed mimic current time for API endpoint tests.
     """
-    with TestClient(app) as test_client:
-        yield test_client
-    app.dependency_overrides.clear()
+
+    def __init__(self, now_value: datetime):
+        self._now_value = now_value
+
+    def now(self) -> datetime:
+        return self._now_value
 
 
 @pytest.fixture
@@ -37,29 +35,33 @@ def api_test_data_dir(tmp_path: Path) -> Path:
     rows = [
         {
             "vendor_id": 1,
-            "tpep_dropoff_datetime": datetime(2025, 1, 15, 9, 0, 0),
+            "tpep_dropoff_datetime": datetime(
+                2025, 1, 15, 9, 0, 0, tzinfo=timezone.utc
+            ),
             "fare_amount": 12.5,
         },
         {
             "vendor_id": 2,
-            "tpep_dropoff_datetime": datetime(2025, 1, 15, 9, 0, 30),
+            "tpep_dropoff_datetime": datetime(
+                2025, 1, 15, 9, 0, 30, tzinfo=timezone.utc
+            ),
             "fare_amount": 18.0,
         },
         {
             "vendor_id": 1,
-            "tpep_dropoff_datetime": datetime(2025, 1, 15, 9, 1, 0),
+            "tpep_dropoff_datetime": datetime(
+                2025, 1, 15, 9, 1, 0, tzinfo=timezone.utc
+            ),
             "fare_amount": 25.0,
         },
     ]
 
-    df = pl.DataFrame(rows)
-    df.write_parquet(data_dir / "yellow_tripdata_2025-01.parquet")
-
+    pl.DataFrame(rows).write_parquet(data_dir / "yellow_tripdata_2025-01.parquet")
     return tmp_path
 
 
 @pytest.fixture
-def resolved_runtime_config_override(api_test_data_dir: Path) -> dict:
+def resolved_runtime_config(api_test_data_dir: Path) -> dict:
     """
     Return a minimal resolved runtime config for API endpoint tests.
     """
@@ -78,28 +80,26 @@ def resolved_runtime_config_override(api_test_data_dir: Path) -> dict:
     }
 
 
-def override_resolved_runtime_config(resolved_runtime_config: dict):
+@pytest.fixture
+def client(resolved_runtime_config: dict):
     """
-    Build a FastAPI dependency override function for resolved runtime config.
+    Create a TestClient backed by test app state and clean up after the test.
     """
+    app.state.api_service = HistoricalApiService(
+        resolved_runtime_config=resolved_runtime_config
+    )
+    app.state.service_clock = DummyClock(
+        now_value=datetime(2025, 1, 15, 9, 30, 0, tzinfo=timezone.utc)
+    )
 
-    def _override() -> dict:
-        return resolved_runtime_config
-
-    return _override
+    with TestClient(app) as test_client:
+        yield test_client
 
 
-def test_get_trips_returns_rows_for_valid_request(
-    client: TestClient,
-    resolved_runtime_config_override: dict,
-):
+def test_get_trips_returns_rows_for_valid_request(client: TestClient):
     """
     Return matching rows for a valid request and preserve response metadata.
     """
-    app.dependency_overrides[get_resolved_runtime_config] = (
-        override_resolved_runtime_config(resolved_runtime_config_override)
-    )
-
     response = client.get(
         "/trips/yellow",
         params={
@@ -113,29 +113,26 @@ def test_get_trips_returns_rows_for_valid_request(
 
     payload = response.json()
     assert payload["vehicle_type"] == "yellow"
-    assert payload["start_time"] == "2025-01-15T09:00:00"
-    assert payload["end_time"] == "2025-01-15T09:01:00"
+    assert payload["start_time"] == "2025-01-15T09:00:00+00:00"
+    assert payload["end_time"] == "2025-01-15T09:01:00+00:00"
     assert payload["limit"] == 10
+    assert payload["mimic_current_time"] == "2025-01-15T09:30:00+00:00"
     assert len(payload["rows"]) == 2
 
-    returned_times = [row["tpep_dropoff_datetime"] for row in payload["rows"]]
+    returned_times = [
+        datetime.fromisoformat(row["tpep_dropoff_datetime"]).astimezone(timezone.utc)
+        for row in payload["rows"]
+    ]
     assert returned_times == [
-        "2025-01-15T09:00:00",
-        "2025-01-15T09:00:30",
+        datetime(2025, 1, 15, 9, 0, 0, tzinfo=timezone.utc),
+        datetime(2025, 1, 15, 9, 0, 30, tzinfo=timezone.utc),
     ]
 
 
-def test_get_trips_returns_400_for_unsupported_vehicle_type(
-    client: TestClient,
-    resolved_runtime_config_override: dict,
-):
+def test_get_trips_returns_400_for_unsupported_vehicle_type(client: TestClient):
     """
     Reject requests for vehicle types that are not supported by config.
     """
-    app.dependency_overrides[get_resolved_runtime_config] = (
-        override_resolved_runtime_config(resolved_runtime_config_override)
-    )
-
     response = client.get(
         "/trips/fakeveh",
         params={
@@ -153,15 +150,10 @@ def test_get_trips_returns_400_for_unsupported_vehicle_type(
 
 def test_get_trips_returns_400_when_start_time_is_not_earlier_than_end_time(
     client: TestClient,
-    resolved_runtime_config_override: dict,
 ):
     """
     Reject requests whose time window is empty or reversed.
     """
-    app.dependency_overrides[get_resolved_runtime_config] = (
-        override_resolved_runtime_config(resolved_runtime_config_override)
-    )
-
     response = client.get(
         "/trips/yellow",
         params={
@@ -177,17 +169,10 @@ def test_get_trips_returns_400_when_start_time_is_not_earlier_than_end_time(
     }
 
 
-def test_get_trips_returns_400_when_limit_is_not_positive(
-    client: TestClient,
-    resolved_runtime_config_override: dict,
-):
+def test_get_trips_returns_400_when_limit_is_not_positive(client: TestClient):
     """
     Reject requests whose limit is zero or negative.
     """
-    app.dependency_overrides[get_resolved_runtime_config] = (
-        override_resolved_runtime_config(resolved_runtime_config_override)
-    )
-
     response = client.get(
         "/trips/yellow",
         params={
@@ -203,17 +188,33 @@ def test_get_trips_returns_400_when_limit_is_not_positive(
     }
 
 
-def test_get_trips_returns_422_for_invalid_datetime_input(
+def test_get_trips_returns_400_when_end_time_exceeds_available_range(
     client: TestClient,
-    resolved_runtime_config_override: dict,
 ):
+    """
+    Reject requests whose end_time exceeds the current API availability boundary.
+    """
+    response = client.get(
+        "/trips/yellow",
+        params={
+            "start_time": "2025-01-15T09:00:00",
+            "end_time": "2025-01-15T09:31:00",
+            "limit": 10,
+        },
+    )
+
+    assert response.status_code == 400
+    assert response.json() == {
+        "detail": (
+            "end_time exceeds currently available API range: 2025-01-15T09:30:00+00:00"
+        ),
+    }
+
+
+def test_get_trips_returns_422_for_invalid_datetime_input(client: TestClient):
     """
     Let FastAPI reject malformed datetime query parameters before endpoint logic runs.
     """
-    app.dependency_overrides[get_resolved_runtime_config] = (
-        override_resolved_runtime_config(resolved_runtime_config_override)
-    )
-
     response = client.get(
         "/trips/yellow",
         params={
@@ -226,22 +227,15 @@ def test_get_trips_returns_422_for_invalid_datetime_input(
     assert response.status_code == 422
 
 
-def test_get_trips_returns_empty_rows_when_no_records_match(
-    client: TestClient,
-    resolved_runtime_config_override: dict,
-):
+def test_get_trips_returns_empty_rows_when_no_records_match(client: TestClient):
     """
     Return an empty rows list when the request is valid but no data matches.
     """
-    app.dependency_overrides[get_resolved_runtime_config] = (
-        override_resolved_runtime_config(resolved_runtime_config_override)
-    )
-
     response = client.get(
         "/trips/yellow",
         params={
-            "start_time": "2025-03-15T09:00:00",
-            "end_time": "2025-03-15T09:01:00",
+            "start_time": "2025-01-15T08:00:00",
+            "end_time": "2025-01-15T08:01:00",
             "limit": 10,
         },
     )
@@ -253,17 +247,10 @@ def test_get_trips_returns_empty_rows_when_no_records_match(
     assert payload["rows"] == []
 
 
-def test_get_trips_respects_limit(
-    client: TestClient,
-    resolved_runtime_config_override: dict,
-):
+def test_get_trips_respects_limit(client: TestClient):
     """
     Return no more than the requested number of rows.
     """
-    app.dependency_overrides[get_resolved_runtime_config] = (
-        override_resolved_runtime_config(resolved_runtime_config_override)
-    )
-
     response = client.get(
         "/trips/yellow",
         params={
@@ -276,24 +263,10 @@ def test_get_trips_respects_limit(
     assert response.status_code == 200
 
     payload = response.json()
+    returned_time = datetime.fromisoformat(
+        payload["rows"][0]["tpep_dropoff_datetime"]
+    ).astimezone(timezone.utc)
+
     assert payload["limit"] == 1
     assert len(payload["rows"]) == 1
-    assert payload["rows"][0]["tpep_dropoff_datetime"] == "2025-01-15T09:00:00"
-
-
-def test_get_api_service_returns_historical_api_service():
-    """
-    Build a HistoricalApiService from the resolved runtime config.
-    """
-    resolved_runtime_config = {
-        "storage": {"target_base_path": "data/raw"},
-        "serving": {
-            "service_event_time_column_by_vehicle_type": {
-                "yellow": "tpep_dropoff_datetime",
-            }
-        },
-    }
-
-    result = get_api_service(resolved_runtime_config=resolved_runtime_config)
-
-    assert isinstance(result, HistoricalApiService)
+    assert returned_time == datetime(2025, 1, 15, 9, 0, 0, tzinfo=timezone.utc)
