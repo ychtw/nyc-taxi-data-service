@@ -3,15 +3,14 @@ from pathlib import Path
 
 import polars as pl
 import pytest
-from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from nyc_taxi_data_service.serving.api.app import (
     app,
-    get_parquet_path,
+    get_api_service,
     get_resolved_runtime_config,
-    get_vehicle_event_time_column,
 )
+from nyc_taxi_data_service.serving.api.service import HistoricalApiService
 
 
 @pytest.fixture
@@ -282,62 +281,19 @@ def test_get_trips_respects_limit(
     assert payload["rows"][0]["tpep_dropoff_datetime"] == "2025-01-15T09:00:00"
 
 
-def test_get_vehicle_event_time_column_returns_expected_column():
+def test_get_api_service_returns_historical_api_service():
     """
-    Return the configured event time column for a supported vehicle type.
-    """
-    resolved_runtime_config = {
-        "serving": {
-            "service_event_time_column_by_vehicle_type": {
-                "yellow": "tpep_dropoff_datetime",
-                "green": "lpep_dropoff_datetime",
-            }
-        }
-    }
-
-    result = get_vehicle_event_time_column(
-        vehicle_type="yellow",
-        resolved_runtime_config=resolved_runtime_config,
-    )
-
-    assert result == "tpep_dropoff_datetime"
-
-
-def test_get_vehicle_event_time_column_raises_for_unsupported_vehicle_type():
-    """
-    Raise an HTTP 400 error when the vehicle type is not configured.
+    Build a HistoricalApiService from the resolved runtime config.
     """
     resolved_runtime_config = {
+        "storage": {"target_base_path": "data/raw"},
         "serving": {
             "service_event_time_column_by_vehicle_type": {
                 "yellow": "tpep_dropoff_datetime",
             }
-        }
+        },
     }
 
-    with pytest.raises(HTTPException) as exc_info:
-        get_vehicle_event_time_column(
-            vehicle_type="fakeveh",
-            resolved_runtime_config=resolved_runtime_config,
-        )
+    result = get_api_service(resolved_runtime_config=resolved_runtime_config)
 
-    assert exc_info.value.status_code == 400
-    assert exc_info.value.detail == "Unsupported vehicle_type: fakeveh"
-
-
-def test_get_parquet_path_builds_expected_glob():
-    """
-    Build the parquet glob path from storage base path and vehicle type.
-    """
-    resolved_runtime_config = {
-        "storage": {
-            "target_base_path": "data/raw",
-        }
-    }
-
-    result = get_parquet_path(
-        vehicle_type="yellow",
-        resolved_runtime_config=resolved_runtime_config,
-    )
-
-    assert result == "data/raw/yellow/year=*/month=*/*.parquet"
+    assert isinstance(result, HistoricalApiService)
