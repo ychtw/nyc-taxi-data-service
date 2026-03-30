@@ -1,19 +1,22 @@
 from datetime import date, datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 import pytest
 
 from nyc_taxi_data_service.serving.common.service_clock import ServiceClock
+
+NY_TZ = ZoneInfo("America/New_York")
 
 
 def test_post_init_sets_real_and_mimic_service_start_times(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """
-    __post_init__ should record the real service start time and the
-    corresponding mimic service start time when the clock is created.
+    __post_init__ should:
+    - store real_service_start_time in UTC
+    - create mimic_service_start_time in New York timezone using the same
+      wall-clock time but replacing the date with mimic_current_date
     """
-    # define the fixed "current time" we want the clock to see
-    # use a constant value to make the test deterministic
     fixed_real_start = datetime(2026, 3, 18, 9, 42, 15, 123456, tzinfo=timezone.utc)
 
     # patch datetime.now(...) inside the service_clock module so clock creation
@@ -38,9 +41,21 @@ def test_post_init_sets_real_and_mimic_service_start_times(
     # date part of the result
     clock = ServiceClock(mimic_current_date=date(2025, 1, 15))
 
+    # real start is unchanged
     assert clock.real_service_start_time == fixed_real_start
+
+    # expected NY local time
+    expected_ny = fixed_real_start.astimezone(NY_TZ)
+
     assert clock.mimic_service_start_time == datetime(
-        2025, 1, 15, 9, 42, 15, 123456, tzinfo=timezone.utc
+        2025,
+        1,
+        15,
+        expected_ny.hour,
+        expected_ny.minute,
+        expected_ny.second,
+        expected_ny.microsecond,
+        tzinfo=NY_TZ,
     )
 
 
@@ -56,20 +71,16 @@ def test_now_returns_mimic_service_start_time_when_no_time_has_elapsed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """
-    now() should return mimic_service_start_time when the current real UTC
-    time is equal to real_service_start_time.
+    now() should return mimic_service_start_time when no real time has elapsed.
     """
     fixed_real_start = datetime(2026, 3, 18, 9, 42, 15, tzinfo=timezone.utc)
 
-    # datetime.now(...) is called twice:
-    # 1. during clock initialization
-    # 2. during now()
-    queued_now_values = [fixed_real_start, fixed_real_start]
+    queued = [fixed_real_start, fixed_real_start]
 
     class FixedDateTime(datetime):
         @classmethod
         def now(cls, tz=None):
-            return queued_now_values.pop(0)
+            return queued.pop(0)
 
     monkeypatch.setattr(
         "nyc_taxi_data_service.serving.common.service_clock.datetime",
@@ -86,18 +97,17 @@ def test_now_advances_by_elapsed_real_time(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """
-    now() should advance the mimic service time by the same elapsed duration
-    as the elapsed real time since service startup.
+    now() should advance by the same elapsed duration as real time.
     """
     fixed_real_start = datetime(2026, 3, 18, 9, 42, 15, tzinfo=timezone.utc)
     fixed_real_now = fixed_real_start + timedelta(hours=3, minutes=15)
 
-    queued_now_values = [fixed_real_start, fixed_real_now]
+    queued = [fixed_real_start, fixed_real_now]
 
     class FixedDateTime(datetime):
         @classmethod
         def now(cls, tz=None):
-            return queued_now_values.pop(0)
+            return queued.pop(0)
 
     monkeypatch.setattr(
         "nyc_taxi_data_service.serving.common.service_clock.datetime",
@@ -120,12 +130,12 @@ def test_now_advances_across_multiple_days(
     fixed_real_start = datetime(2026, 3, 18, 9, 42, 15, tzinfo=timezone.utc)
     fixed_real_now = fixed_real_start + timedelta(days=2, hours=4)
 
-    queued_now_values = [fixed_real_start, fixed_real_now]
+    queued = [fixed_real_start, fixed_real_now]
 
     class FixedDateTime(datetime):
         @classmethod
         def now(cls, tz=None):
-            return queued_now_values.pop(0)
+            return queued.pop(0)
 
     monkeypatch.setattr(
         "nyc_taxi_data_service.serving.common.service_clock.datetime",
@@ -139,22 +149,21 @@ def test_now_advances_across_multiple_days(
     assert result.date() == date(2025, 1, 17)
 
 
-def test_now_preserves_utc_timezone_in_returned_datetime(
+def test_now_returns_new_york_timezone(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """
-    now() should preserve timezone-aware UTC datetimes when computing the
-    current mimic service time.
+    now() should return a timezone-aware datetime in America/New_York.
     """
     fixed_real_start = datetime(2026, 3, 18, 9, 42, 15, tzinfo=timezone.utc)
     fixed_real_now = fixed_real_start + timedelta(minutes=30)
 
-    queued_now_values = [fixed_real_start, fixed_real_now]
+    queued = [fixed_real_start, fixed_real_now]
 
     class FixedDateTime(datetime):
         @classmethod
         def now(cls, tz=None):
-            return queued_now_values.pop(0)
+            return queued.pop(0)
 
     monkeypatch.setattr(
         "nyc_taxi_data_service.serving.common.service_clock.datetime",
@@ -164,10 +173,10 @@ def test_now_preserves_utc_timezone_in_returned_datetime(
     clock = ServiceClock(mimic_current_date=date(2025, 1, 15))
     result = clock.now()
 
-    assert result.tzinfo == timezone.utc
+    assert result.tzinfo == NY_TZ
 
 
-def test_now_uses_current_system_time_when_called(
+def test_now_uses_current_time_not_cached_time(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """
@@ -177,14 +186,12 @@ def test_now_uses_current_system_time_when_called(
     fixed_real_start = datetime(2026, 3, 18, 9, 42, 15, tzinfo=timezone.utc)
     fixed_real_now = fixed_real_start + timedelta(hours=2, minutes=30)
 
-    # The first value is used in __post_init__, and the second value is used
-    # when now() calls datetime.now(timezone.utc).
-    queued_now_values = [fixed_real_start, fixed_real_now]
+    queued = [fixed_real_start, fixed_real_now]
 
     class FixedDateTime(datetime):
         @classmethod
         def now(cls, tz=None):
-            return queued_now_values.pop(0)
+            return queued.pop(0)
 
     monkeypatch.setattr(
         "nyc_taxi_data_service.serving.common.service_clock.datetime",
@@ -195,4 +202,4 @@ def test_now_uses_current_system_time_when_called(
     result = clock.now()
 
     assert clock.real_service_start_time == fixed_real_start
-    assert result == datetime(2025, 1, 15, 12, 12, 15, tzinfo=timezone.utc)
+    assert result == clock.mimic_service_start_time + timedelta(hours=2, minutes=30)
