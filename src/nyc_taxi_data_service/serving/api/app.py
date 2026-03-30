@@ -17,8 +17,8 @@ def get_duckdb_connection() -> Generator[duckdb.DuckDBPyConnection, None, None]:
     Create a DuckDB connection for a single API request.
 
     This dependency yields a fresh in-memory DuckDB connection and ensures it is
-    closed after the request completes. At this initial stage, the service queries
-    Parquet files directly, so a request-scoped in-memory connection is sufficient.
+    closed after the request completes. At this initial stage, the API service queries
+    parquet files directly, so a request-scoped in-memory connection is sufficient.
     """
     # open a fresh DuckDB connection for this request
     con = duckdb.connect(database=":memory:")
@@ -31,7 +31,7 @@ def get_duckdb_connection() -> Generator[duckdb.DuckDBPyConnection, None, None]:
 
 def create_app() -> FastAPI:
     """
-    Create and configure the FastAPI application for the API service.
+    Create and configure the FastAPI application for the historical data API service.
     """
     app = FastAPI()
 
@@ -56,7 +56,7 @@ def create_app() -> FastAPI:
         end_time: datetime,
         limit: int = 100,
         con: duckdb.DuckDBPyConnection = Depends(get_duckdb_connection),
-    ):
+    ) -> dict:
         """
         Return trip records for a vehicle type within a requested time window.
 
@@ -66,8 +66,8 @@ def create_app() -> FastAPI:
 
         Args:
             vehicle_type: Requested vehicle type from the route path.
-            start_time: Inclusive lower bound for the event-time filter.
-            end_time: Exclusive upper bound for the event-time filter.
+            start_time: Inclusive lower bound for the requested event-time window.
+            end_time: Exclusive upper bound for the requested event-time window.
             limit: Maximum number of rows to return.
             con: DuckDB connection injected by FastAPI.
 
@@ -76,6 +76,9 @@ def create_app() -> FastAPI:
             trip rows.
         """
         api_service: HistoricalApiService = request.app.state.api_service
+
+        # service clock now returns the current mimic time as an aware
+        # America/New_York datetime
         mimic_current_time: datetime = request.app.state.service_clock.now()
 
         return api_service.get_trips(

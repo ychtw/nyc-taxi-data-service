@@ -1,9 +1,12 @@
 import textwrap
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import duckdb
 from fastapi import HTTPException
+
+SERVICE_TZ = ZoneInfo("America/New_York")
 
 
 class HistoricalApiService:
@@ -13,6 +16,11 @@ class HistoricalApiService:
     This service handles all supported vehicle types. Vehicle-specific details,
     such as the event-time column and Parquet path, are resolved from the
     runtime configuration for each request.
+
+    Service-layer time semantics use timezone-aware `America/New_York`
+    datetimes. Before querying DuckDB against raw TLC event-time columns,
+    request boundaries are converted to naive New York-local datetimes so they
+    match the source parquet timestamp values.
     """
 
     def __init__(self, resolved_runtime_config: dict):
@@ -68,25 +76,45 @@ class HistoricalApiService:
 
     def normalize_request_datetime(self, dt: datetime, field_name: str) -> datetime:
         """
-        Normalize a request datetime to a timezone-aware UTC datetime.
+        Normalize a request datetime into a timezone-aware New York datetime.
 
-        Naive datetimes are interpreted as UTC for the current API implementation.
+        Rules:
+        - naive request datetimes are interpreted as New York local time
+        - timezone-aware request datetimes are converted into New York time
 
         Args:
             dt: Datetime provided by the API request.
-            field_name: Name of the request field, used in error messages.
+            field_name: Name of the request field, reserved for future
+                field-specific validation or error messaging.
 
         Returns:
-            A timezone-aware UTC datetime.
-
-        Raises:
-            HTTPException: If the datetime is timezone-aware but not in UTC and you
-                choose to reject non-UTC input.
+            A timezone-aware datetime in `America/New_York`.
         """
         if dt.tzinfo is None:
-            return dt.replace(tzinfo=timezone.utc)
+            return dt.replace(tzinfo=SERVICE_TZ)
 
-        return dt.astimezone(timezone.utc)
+        return dt.astimezone(SERVICE_TZ)
+
+    def to_duckdb_timestamp_value(self, dt: datetime) -> datetime:
+        """
+        Convert a service-layer datetime to a naive DuckDB timestamp value.
+
+        TLC parquet event-time columns are stored without timezone information
+        but are interpreted by this project as New York local time. This helper
+        converts a timezone-aware New York datetime into a naive datetime with
+        the same local wall-clock value so it can be compared against those raw
+        event-time columns in DuckDB.
+
+        Args:
+            dt: Datetime boundary from service-layer logic.
+
+        Returns:
+            A naive New York-local datetime suitable for DuckDB TIMESTAMP
+            comparisons against TLC event-time columns.
+        """
+        if dt.tzinfo is None:
+            return dt
+        return dt.replace(tzinfo=None)
 
     def get_available_through(self, mimic_current_time: datetime) -> datetime:
         """
@@ -197,6 +225,9 @@ class HistoricalApiService:
         parquet_path = self.get_parquet_path(vehicle_type=vehicle_type)
 
         # construct query
+        query_start_time = self.to_duckdb_timestamp_value(start_time)
+        query_end_time = self.to_duckdb_timestamp_value(end_time)
+
         query = textwrap.dedent(
             f"""
             SELECT *
@@ -207,7 +238,7 @@ class HistoricalApiService:
             LIMIT ?
             """
         )
-        query_params = [parquet_path, start_time, end_time, limit]
+        query_params = [parquet_path, query_start_time, query_end_time, limit]
 
         # convert the query result into plain Python dictionaries so FastAPI can
         # serialize the response body as JSON

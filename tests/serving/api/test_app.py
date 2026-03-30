@@ -1,5 +1,6 @@
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import polars as pl
 import pytest
@@ -7,6 +8,8 @@ from fastapi.testclient import TestClient
 
 from nyc_taxi_data_service.serving.api.app import app
 from nyc_taxi_data_service.serving.api.service import HistoricalApiService
+
+NY_TZ = ZoneInfo("America/New_York")
 
 
 class DummyClock:
@@ -28,6 +31,9 @@ def api_test_data_dir(tmp_path: Path) -> Path:
 
     Layout:
         <tmp>/yellow/year=2025/month=01/*.parquet
+
+    The TLC-style event-time column is written as naive New York-local
+    timestamps so it matches the API service's DuckDB query semantics.
     """
     data_dir = tmp_path / "yellow" / "year=2025" / "month=01"
     data_dir.mkdir(parents=True)
@@ -35,23 +41,17 @@ def api_test_data_dir(tmp_path: Path) -> Path:
     rows = [
         {
             "vendor_id": 1,
-            "tpep_dropoff_datetime": datetime(
-                2025, 1, 15, 9, 0, 0, tzinfo=timezone.utc
-            ),
+            "tpep_dropoff_datetime": datetime(2025, 1, 15, 9, 0, 0),
             "fare_amount": 12.5,
         },
         {
             "vendor_id": 2,
-            "tpep_dropoff_datetime": datetime(
-                2025, 1, 15, 9, 0, 30, tzinfo=timezone.utc
-            ),
+            "tpep_dropoff_datetime": datetime(2025, 1, 15, 9, 0, 30),
             "fare_amount": 18.0,
         },
         {
             "vendor_id": 1,
-            "tpep_dropoff_datetime": datetime(
-                2025, 1, 15, 9, 1, 0, tzinfo=timezone.utc
-            ),
+            "tpep_dropoff_datetime": datetime(2025, 1, 15, 9, 1, 0),
             "fare_amount": 25.0,
         },
     ]
@@ -89,14 +89,14 @@ def client(resolved_runtime_config: dict):
         resolved_runtime_config=resolved_runtime_config
     )
     app.state.service_clock = DummyClock(
-        now_value=datetime(2025, 1, 15, 9, 30, 0, tzinfo=timezone.utc)
+        now_value=datetime(2025, 1, 15, 9, 30, 0, tzinfo=NY_TZ)
     )
 
     with TestClient(app) as test_client:
         yield test_client
 
 
-def test_get_trips_returns_rows_for_valid_request(client: TestClient):
+def test_get_trips_returns_rows_for_valid_request(client: TestClient) -> None:
     """
     Return matching rows for a valid request and preserve response metadata.
     """
@@ -113,23 +113,22 @@ def test_get_trips_returns_rows_for_valid_request(client: TestClient):
 
     payload = response.json()
     assert payload["vehicle_type"] == "yellow"
-    assert payload["start_time"] == "2025-01-15T09:00:00+00:00"
-    assert payload["end_time"] == "2025-01-15T09:01:00+00:00"
+    assert payload["start_time"] == "2025-01-15T09:00:00-05:00"
+    assert payload["end_time"] == "2025-01-15T09:01:00-05:00"
     assert payload["limit"] == 10
-    assert payload["mimic_current_time"] == "2025-01-15T09:30:00+00:00"
+    assert payload["mimic_current_time"] == "2025-01-15T09:30:00-05:00"
     assert len(payload["rows"]) == 2
 
-    returned_times = [
-        datetime.fromisoformat(row["tpep_dropoff_datetime"]).astimezone(timezone.utc)
-        for row in payload["rows"]
-    ]
+    returned_times = [row["tpep_dropoff_datetime"] for row in payload["rows"]]
     assert returned_times == [
-        datetime(2025, 1, 15, 9, 0, 0, tzinfo=timezone.utc),
-        datetime(2025, 1, 15, 9, 0, 30, tzinfo=timezone.utc),
+        "2025-01-15T09:00:00",
+        "2025-01-15T09:00:30",
     ]
 
 
-def test_get_trips_returns_400_for_unsupported_vehicle_type(client: TestClient):
+def test_get_trips_returns_400_for_unsupported_vehicle_type(
+    client: TestClient,
+) -> None:
     """
     Reject requests for vehicle types that are not supported by config.
     """
@@ -150,7 +149,7 @@ def test_get_trips_returns_400_for_unsupported_vehicle_type(client: TestClient):
 
 def test_get_trips_returns_400_when_start_time_is_not_earlier_than_end_time(
     client: TestClient,
-):
+) -> None:
     """
     Reject requests whose time window is empty or reversed.
     """
@@ -169,7 +168,9 @@ def test_get_trips_returns_400_when_start_time_is_not_earlier_than_end_time(
     }
 
 
-def test_get_trips_returns_400_when_limit_is_not_positive(client: TestClient):
+def test_get_trips_returns_400_when_limit_is_not_positive(
+    client: TestClient,
+) -> None:
     """
     Reject requests whose limit is zero or negative.
     """
@@ -190,7 +191,7 @@ def test_get_trips_returns_400_when_limit_is_not_positive(client: TestClient):
 
 def test_get_trips_returns_400_when_end_time_exceeds_available_range(
     client: TestClient,
-):
+) -> None:
     """
     Reject requests whose end_time exceeds the current API availability boundary.
     """
@@ -206,12 +207,14 @@ def test_get_trips_returns_400_when_end_time_exceeds_available_range(
     assert response.status_code == 400
     assert response.json() == {
         "detail": (
-            "end_time exceeds currently available API range: 2025-01-15T09:30:00+00:00"
+            "end_time exceeds currently available API range: 2025-01-15T09:30:00-05:00"
         ),
     }
 
 
-def test_get_trips_returns_422_for_invalid_datetime_input(client: TestClient):
+def test_get_trips_returns_422_for_invalid_datetime_input(
+    client: TestClient,
+) -> None:
     """
     Let FastAPI reject malformed datetime query parameters before endpoint logic runs.
     """
@@ -227,7 +230,9 @@ def test_get_trips_returns_422_for_invalid_datetime_input(client: TestClient):
     assert response.status_code == 422
 
 
-def test_get_trips_returns_empty_rows_when_no_records_match(client: TestClient):
+def test_get_trips_returns_empty_rows_when_no_records_match(
+    client: TestClient,
+) -> None:
     """
     Return an empty rows list when the request is valid but no data matches.
     """
@@ -247,7 +252,7 @@ def test_get_trips_returns_empty_rows_when_no_records_match(client: TestClient):
     assert payload["rows"] == []
 
 
-def test_get_trips_respects_limit(client: TestClient):
+def test_get_trips_respects_limit(client: TestClient) -> None:
     """
     Return no more than the requested number of rows.
     """
@@ -263,10 +268,7 @@ def test_get_trips_respects_limit(client: TestClient):
     assert response.status_code == 200
 
     payload = response.json()
-    returned_time = datetime.fromisoformat(
-        payload["rows"][0]["tpep_dropoff_datetime"]
-    ).astimezone(timezone.utc)
 
     assert payload["limit"] == 1
     assert len(payload["rows"]) == 1
-    assert returned_time == datetime(2025, 1, 15, 9, 0, 0, tzinfo=timezone.utc)
+    assert payload["rows"][0]["tpep_dropoff_datetime"] == "2025-01-15T09:00:00"
