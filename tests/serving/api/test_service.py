@@ -187,6 +187,7 @@ def test_validate_request_window_accepts_valid_inputs(
         end_time=datetime(2025, 1, 15, 9, 1, 0, tzinfo=NY_TZ),
         available_through=datetime(2025, 1, 15, 9, 30, 0, tzinfo=NY_TZ),
         limit=10,
+        vehicle_type="yellow",
     )
 
 
@@ -202,6 +203,7 @@ def test_validate_request_window_raises_when_start_time_is_not_earlier_than_end_
             end_time=datetime(2025, 1, 15, 9, 1, 0, tzinfo=NY_TZ),
             available_through=datetime(2025, 1, 15, 9, 30, 0, tzinfo=NY_TZ),
             limit=10,
+            vehicle_type="yellow",
         )
 
     assert exc_info.value.status_code == 400
@@ -220,6 +222,7 @@ def test_validate_request_window_raises_when_limit_is_not_positive(
             end_time=datetime(2025, 1, 15, 9, 1, 0, tzinfo=NY_TZ),
             available_through=datetime(2025, 1, 15, 9, 30, 0, tzinfo=NY_TZ),
             limit=0,
+            vehicle_type="yellow",
         )
 
     assert exc_info.value.status_code == 400
@@ -238,6 +241,7 @@ def test_validate_request_window_raises_when_end_time_exceeds_available_range(
             end_time=datetime(2025, 1, 15, 9, 31, 0, tzinfo=NY_TZ),
             available_through=datetime(2025, 1, 15, 9, 30, 0, tzinfo=NY_TZ),
             limit=10,
+            vehicle_type="yellow",
         )
 
     assert exc_info.value.status_code == 400
