@@ -8,6 +8,8 @@ from zoneinfo import ZoneInfo
 import duckdb
 from confluent_kafka import Producer
 
+from nyc_taxi_data_service.serving.common.log_time import format_log_dt
+
 logger = logging.getLogger(__name__)  # initialize default logger
 
 
@@ -199,8 +201,8 @@ class KafkaReplayProducer:
         logger.debug(
             "Publish available rows | vehicle_type=%s | watermark=%s | mimic_current_time=%s",
             self.vehicle_type,
-            self._replay_watermark,
-            mimic_current_time,
+            format_log_dt(self._replay_watermark),
+            format_log_dt(mimic_current_time),
         )
 
         rows = self._fetch_eligible_rows(mimic_current_time)
@@ -221,7 +223,7 @@ class KafkaReplayProducer:
             "Publish cycle complete | vehicle_type=%s | published_count=%d | new_watermark=%s",
             self.vehicle_type,
             published_count,
-            self._replay_watermark,
+            format_log_dt(self._replay_watermark),
         )
 
         return published_count
@@ -268,9 +270,9 @@ class KafkaReplayProducer:
             "Fetch eligible rows | vehicle_type=%s | branch=%s | watermark=%s | mimic_service_start_time=%s | mimic_current_time=%s",
             self.vehicle_type,
             "initial" if self._replay_watermark is None else "incremental",
-            self._replay_watermark,
-            self.mimic_service_start_time,
-            mimic_current_time,
+            format_log_dt(self._replay_watermark),
+            format_log_dt(self.mimic_service_start_time),
+            format_log_dt(mimic_current_time),
         )
 
         # construct parameterized query
@@ -312,11 +314,9 @@ class KafkaReplayProducer:
                 return []
 
             logger.debug(
-                "Normalized DuckDB query params | lower=%r (%s) | upper=%r (%s)",
-                query_params[0],
-                type(query_params[0]).__name__,
-                query_params[-1],
-                type(query_params[-1]).__name__,
+                "Replay event-time bounds for DuckDB query | lower_bound=%s | upper_bound=%s",
+                format_log_dt(query_params[0]),
+                format_log_dt(query_params[-1]),
             )
 
             rows = con.execute(query, query_params).to_arrow_table().to_pylist()
@@ -338,8 +338,8 @@ class KafkaReplayProducer:
                 logger.debug(
                     "Buffer table stats | vehicle_type=%s | min_event_time=%s | max_event_time=%s | row_count=%s",
                     self.vehicle_type,
-                    stats_row[0],
-                    stats_row[1],
+                    format_log_dt(stats_row[0]),
+                    format_log_dt(stats_row[1]),
                     stats_row[2],
                 )
 
@@ -365,8 +365,8 @@ class KafkaReplayProducer:
             self.vehicle_type,
             self.topic_name,
             len(rows),
-            rows[0][self.event_time_column],
-            rows[-1][self.event_time_column],
+            format_log_dt(rows[0][self.event_time_column]),
+            format_log_dt(rows[-1][self.event_time_column]),
         )
 
         # since the input rows are sorted by time, the last row represents

@@ -8,6 +8,7 @@ from nyc_taxi_data_service.config.config_loader import (
     load_runtime_config,
     resolve_runtime_config,
 )
+from nyc_taxi_data_service.serving.common.log_time import format_log_dt
 from nyc_taxi_data_service.serving.common.service_clock import ServiceClock
 from nyc_taxi_data_service.serving.streaming.kafka_admin import (
     ensure_streaming_topics_exist,
@@ -224,7 +225,7 @@ def _run_publish_cycle(
     """
     logger.debug(
         "Publish cycle | mimic_current_time=%s | vehicle_types=%s",
-        mimic_current_time,
+        format_log_dt(mimic_current_time),
         list(replay_producers),
     )
     for replay_producer in replay_producers.values():
@@ -302,7 +303,9 @@ def run_streaming(resolved_runtime_config: dict) -> None:
 
     # build the upper bound time (exclusive) of streaming service
     stream_end_time = _build_stream_exhaustion_boundary(resolved_runtime_config)
-    logger.debug("Streaming upper bound (exclusive): %s", stream_end_time)
+    logger.debug(
+        "Streaming upper bound (exclusive): %s", format_log_dt(stream_end_time)
+    )
 
     # get 2 timing controls used by the streaming service:
     # - window_size: how much source data each buffer-fill query stages into DuckDB
@@ -323,8 +326,9 @@ def run_streaming(resolved_runtime_config: dict) -> None:
     service_clock = ServiceClock(mimic_current_date=mimic_current_date)
     mimic_service_start_time = service_clock.mimic_service_start_time
     logger.info(
-        "Service clock started | mimic_service_start_time=%s",
-        mimic_service_start_time,
+        "Service clock started | real_service_start_time=%s | mimic_service_start_time=%s",
+        format_log_dt(service_clock.real_service_start_time),
+        format_log_dt(mimic_service_start_time),
     )
 
     # configure vehicle types for this streaming run
@@ -402,8 +406,8 @@ def run_streaming(resolved_runtime_config: dict) -> None:
                     logger.debug(
                         "Buffer-ahead check triggered buffering | vehicle_type=%s | mimic_current_time=%s | next_window_start=%s",
                         window_buffer.vehicle_type,
-                        mimic_current_time,
-                        window_start,
+                        format_log_dt(mimic_current_time),
+                        format_log_dt(window_start),
                     )
                     window_buffer.buffer_current_window()
                     # remove rows older than retention to prevent unbounded buffer growth
@@ -416,9 +420,9 @@ def run_streaming(resolved_runtime_config: dict) -> None:
             if now >= next_publish_at:
                 logger.debug(
                     "Scheduled publish triggered | now=%s | next_publish_at=%s | mimic_current_time=%s",
-                    now,
-                    next_publish_at,
-                    mimic_current_time,
+                    format_log_dt(now),
+                    format_log_dt(next_publish_at),
+                    format_log_dt(mimic_current_time),
                 )
 
                 # note: one publish cycle already attempts to send all rows eligible up to `mimic_current_time`

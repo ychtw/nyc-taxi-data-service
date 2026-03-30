@@ -1,3 +1,4 @@
+import logging
 from collections.abc import Generator
 from datetime import date, datetime
 
@@ -9,7 +10,10 @@ from nyc_taxi_data_service.config.config_loader import (
     resolve_runtime_config,
 )
 from nyc_taxi_data_service.serving.api.service import HistoricalApiService
+from nyc_taxi_data_service.serving.common.log_time import format_log_dt
 from nyc_taxi_data_service.serving.common.service_clock import ServiceClock
+
+logger = logging.getLogger(__name__)
 
 
 def get_duckdb_connection() -> Generator[duckdb.DuckDBPyConnection, None, None]:
@@ -48,6 +52,12 @@ def create_app() -> FastAPI:
         resolved_runtime_config=resolved_runtime_config
     )
 
+    logger.info(
+        "Starting NYC taxi historical API service | mimic_current_date=%s | mimic_service_start_time=%s",
+        mimic_current_date,
+        format_log_dt(app.state.service_clock.mimic_service_start_time),
+    )
+
     @app.get("/trips/{vehicle_type}")
     def get_trips(
         request: Request,
@@ -80,6 +90,15 @@ def create_app() -> FastAPI:
         # service clock now returns the current mimic time as an aware
         # America/New_York datetime
         mimic_current_time: datetime = request.app.state.service_clock.now()
+
+        logger.debug(
+            "Received API trip request | vehicle_type=%s | start_time=%s | end_time=%s | limit=%d | mimic_current_time=%s",
+            vehicle_type,
+            format_log_dt(start_time),
+            format_log_dt(end_time),
+            limit,
+            format_log_dt(mimic_current_time),
+        )
 
         return api_service.get_trips(
             vehicle_type=vehicle_type,

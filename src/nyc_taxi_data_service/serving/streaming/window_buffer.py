@@ -6,6 +6,8 @@ from pathlib import Path
 
 import duckdb
 
+from nyc_taxi_data_service.serving.common.log_time import format_log_dt
+
 logger = logging.getLogger(__name__)
 
 
@@ -313,8 +315,8 @@ class StreamingWindowBuffer:
                 # logger.debug(
                 #     "Buffer window | vehicle_type=%s | row_count=0 | window_start_inclusive=%s | window_end_exclusive=%s",
                 #     self.vehicle_type,
-                #     query_window_start,
-                #     query_window_end,
+                #     format_log_dt(query_window_start),
+                #     format_log_dt(query_window_end),
                 # )
                 return 0
 
@@ -322,8 +324,8 @@ class StreamingWindowBuffer:
                 "Buffer window | vehicle_type=%s | row_count=%d | window_start_inclusive=%s | window_end_exclusive=%s",
                 self.vehicle_type,
                 row_count,
-                window_start,
-                window_end,
+                format_log_dt(window_start),
+                format_log_dt(window_end),
             )
 
             # persist matching records from temp table into the buffer table
@@ -383,7 +385,7 @@ class StreamingWindowBuffer:
                 "Delete expired buffer rows | vehicle_type=%s | deleted_count=%d | retention_cutoff_exclusive=%s",
                 self.vehicle_type,
                 deleted_count,
-                retention_cutoff,
+                format_log_dt(retention_cutoff),
             )
 
         return deleted_count
