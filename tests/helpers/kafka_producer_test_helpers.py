@@ -1,5 +1,4 @@
-from datetime import datetime, timezone
-from zoneinfo import ZoneInfo
+from datetime import datetime
 
 import pytest
 
@@ -110,8 +109,8 @@ def create_buffer_table_and_insert_rows(
         con.execute(insert_sql, insert_sql_params)
 
 
-def nyc_local_to_utc_naive(dt_local: datetime) -> datetime:
-    """Convert naive America/New_York datetime to naive UTC datetime."""
-    aware_local = dt_local.replace(tzinfo=ZoneInfo("America/New_York"))
-    aware_utc = aware_local.astimezone(timezone.utc)
-    return aware_utc.replace(tzinfo=None)
+# def nyc_local_to_utc_naive(dt_local: datetime) -> datetime:
+#     """Convert naive America/New_York datetime to naive UTC datetime."""
+#     aware_local = dt_local.replace(tzinfo=ZoneInfo("America/New_York"))
+#     aware_utc = aware_local.astimezone(timezone.utc)
+#     return aware_utc.replace(tzinfo=None)

@@ -1,11 +1,14 @@
 import json
 import logging
 import textwrap
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import duckdb
 from confluent_kafka import Producer
+
+from nyc_taxi_data_service.serving.common.log_time import format_log_dt
 
 logger = logging.getLogger(__name__)  # initialize default logger
 
@@ -16,6 +19,11 @@ logger = logging.getLogger(__name__)  # initialize default logger
 class KafkaReplayProducer:
     """
     Replay buffered rows for one vehicle type into a Kafka topic.
+
+    Replay state is tracked in timezone-aware `America/New_York` datetimes at
+    the service layer. Before querying DuckDB, replay bounds are converted to
+    naive New York-local datetimes so they align with the raw TLC event-time
+    values stored in the buffer table.
     """
 
     def __init__(
@@ -36,8 +44,8 @@ class KafkaReplayProducer:
                 `yellow` or `green`.
             resolved_runtime_config: Runtime configuration dictionary containing
                 serving, buffer, and Kafka settings.
-            mimic_service_start_time: Initial replay lower bound. Rows with event
-                times at or before this timestamp are treated as already replayed.
+            mimic_service_start_time: Initial replay lower bound as a
+                timezone-aware `America/New_York` datetime.
         """
         streaming_config = resolved_runtime_config["serving"]["streaming"]
         kafka_config = streaming_config["kafka"]
@@ -56,7 +64,6 @@ class KafkaReplayProducer:
         if vehicle_type not in event_time_map:
             raise ValueError(f"Unsupported vehicle_type: {vehicle_type}")
         self.event_time_column = event_time_map[vehicle_type]
-        self.event_time_column_utc = f"{self.event_time_column}_utc"
 
         # buffer source settings
         # each vehicle type (yellow, green, etc.) has its own physical DuckDB file
@@ -65,7 +72,7 @@ class KafkaReplayProducer:
         )
         self.buffer_table_name = streaming_config["buffer"]["db_table_name"]
 
-        # kafka naming
+        # kafka topic naming
         self.topic_name = f"{kafka_config['topic']['prefix']}_{vehicle_type}"
 
         # kafka producer client config
@@ -79,9 +86,8 @@ class KafkaReplayProducer:
         """
         Build a Confluent Kafka producer config dict from runtime config.
 
-        The runtime config uses Python-friendly snake_case keys. This helper
-        validates required fields and maps supported keys into the dot-separated
-        librdkafka names expected by ``confluent_kafka.Producer``.
+        This helper validates required fields and maps supported keys into
+        the dot-separated librdkafka names expected by `confluent_kafka.Producer`.
 
         Args:
             kafka_config: Kafka config dictionary containing `client` and
@@ -147,39 +153,35 @@ class KafkaReplayProducer:
     @staticmethod
     def _from_duckdb_timestamp_value(dt: datetime) -> datetime:
         """
-        Normalize a DuckDB TIMESTAMP value into an aware UTC datetime.
+        Convert a DuckDB TIMESTAMP value into an aware New York datetime.
 
-        DuckDB returns TIMESTAMP values without timezone information. For replay
-        state kept in Python, normalize those values into timezone-aware UTC
-        datetimes so in-memory watermark state stays consistent with ServiceClock.
+        DuckDB returns raw TLC event-time values as naive timestamps. This helper
+        attaches the New York timezone so replay watermark state remains explicit
+        and consistent in Python service logic.
         """
         if dt.tzinfo is None:
-            return dt.replace(tzinfo=timezone.utc)
-        return dt.astimezone(timezone.utc)
+            return dt.replace(tzinfo=ZoneInfo("America/New_York"))
+        return dt.astimezone(ZoneInfo("America/New_York"))
 
     @staticmethod
     def _to_duckdb_timestamp_value(dt: datetime) -> datetime:
         """
-        Normalize a replay-boundary datetime for DuckDB TIMESTAMP comparisons.
+        Convert a service-layer replay boundary into a naive DuckDB timestamp.
 
-        ServiceClock produces timezone-aware UTC datetimes, but the buffered event
-        time values queried from DuckDB are compared as plain TIMESTAMP values.
-        During local replay, passing aware UTC datetimes directly into DuckDB
-        comparison parameters caused eligible buffered rows to be missed.
-
-        To keep the comparison semantics consistent, this helper converts aware UTC
-        datetimes into naive UTC datetimes before they are used as SQL query
-        parameters. If the input is already naive, it is returned unchanged.
+        Replay bounds are tracked in Python as timezone-aware New York datetimes.
+        The buffer table stores raw TLC event-time values as naive timestamps, so
+        this helper drops timezone info while preserving the local wall-clock time.
 
         Args:
             dt: Datetime value used as a replay query boundary.
 
         Returns:
-            A naive UTC datetime suitable for DuckDB TIMESTAMP comparisons.
+            A naive New York-local datetime suitable for DuckDB TIMESTAMP
+            comparisons.
         """
         if dt.tzinfo is None:
             return dt
-        return dt.astimezone(timezone.utc).replace(tzinfo=None)
+        return dt.replace(tzinfo=None)
 
     def publish_available(self, mimic_current_time: datetime) -> int:
         """
@@ -199,8 +201,8 @@ class KafkaReplayProducer:
         logger.debug(
             "Publish available rows | vehicle_type=%s | watermark=%s | mimic_current_time=%s",
             self.vehicle_type,
-            self._replay_watermark,
-            mimic_current_time,
+            format_log_dt(self._replay_watermark),
+            format_log_dt(mimic_current_time),
         )
 
         rows = self._fetch_eligible_rows(mimic_current_time)
@@ -221,7 +223,7 @@ class KafkaReplayProducer:
             "Publish cycle complete | vehicle_type=%s | published_count=%d | new_watermark=%s",
             self.vehicle_type,
             published_count,
-            self._replay_watermark,
+            format_log_dt(self._replay_watermark),
         )
 
         return published_count
@@ -233,18 +235,10 @@ class KafkaReplayProducer:
         """
         Build the lower and upper replay bounds for the current fetch query.
 
-        Replay state is kept as aware UTC datetimes in Python, but DuckDB compares
-        against plain TIMESTAMP values in the buffer table. This helper therefore
-        normalizes both bounds into naive UTC datetimes before they are used as SQL
-        query parameters.
-
-        Args:
-            mimic_current_time: Current service time used as the inclusive upper
-                bound of the replay window.
-
-        Returns:
-            A tuple of:
-                (lower_bound, upper_bound)
+        Replay state is kept as aware New York datetimes in Python, but DuckDB
+        compares against naive TIMESTAMP values in the buffer table. This helper
+        therefore converts both bounds into naive New York-local datetimes
+        before they are used as SQL query parameters.
         """
         if self._replay_watermark is None:
             lower_bound = self._to_duckdb_timestamp_value(self.mimic_service_start_time)
@@ -276,9 +270,9 @@ class KafkaReplayProducer:
             "Fetch eligible rows | vehicle_type=%s | branch=%s | watermark=%s | mimic_service_start_time=%s | mimic_current_time=%s",
             self.vehicle_type,
             "initial" if self._replay_watermark is None else "incremental",
-            self._replay_watermark,
-            self.mimic_service_start_time,
-            mimic_current_time,
+            format_log_dt(self._replay_watermark),
+            format_log_dt(self.mimic_service_start_time),
+            format_log_dt(mimic_current_time),
         )
 
         # construct parameterized query
@@ -290,10 +284,10 @@ class KafkaReplayProducer:
                 f"""
                 SELECT *
                 FROM {self.buffer_table_name}
-                WHERE {self.event_time_column_utc} IS NOT NULL
-                    AND {self.event_time_column_utc} >= ?
-                    AND {self.event_time_column_utc} <= ?
-                ORDER BY {self.event_time_column_utc} ASC
+                WHERE {self.event_time_column} IS NOT NULL
+                    AND {self.event_time_column} >= ?
+                    AND {self.event_time_column} <= ?
+                ORDER BY {self.event_time_column} ASC
                 """
             )
         else:
@@ -301,10 +295,10 @@ class KafkaReplayProducer:
                 f"""
                 SELECT *
                 FROM {self.buffer_table_name}
-                WHERE {self.event_time_column_utc} IS NOT NULL
-                    AND {self.event_time_column_utc} > ?
-                    AND {self.event_time_column_utc} <= ?
-                ORDER BY {self.event_time_column_utc} ASC
+                WHERE {self.event_time_column} IS NOT NULL
+                    AND {self.event_time_column} > ?
+                    AND {self.event_time_column} <= ?
+                ORDER BY {self.event_time_column} ASC
                 """
             )
         lower_bound, upper_bound = self._get_fetch_bounds(mimic_current_time)
@@ -320,11 +314,9 @@ class KafkaReplayProducer:
                 return []
 
             logger.debug(
-                "Normalized DuckDB query params | lower=%r (%s) | upper=%r (%s)",
-                query_params[0],
-                type(query_params[0]).__name__,
-                query_params[-1],
-                type(query_params[-1]).__name__,
+                "Replay event-time bounds for DuckDB query | lower_bound=%s | upper_bound=%s",
+                format_log_dt(query_params[0]),
+                format_log_dt(query_params[-1]),
             )
 
             rows = con.execute(query, query_params).to_arrow_table().to_pylist()
@@ -333,11 +325,11 @@ class KafkaReplayProducer:
                 stats_query = textwrap.dedent(
                     f"""
                     SELECT
-                        MIN({self.event_time_column_utc}) AS min_event_time,
-                        MAX({self.event_time_column_utc}) AS max_event_time,
+                        MIN({self.event_time_column}) AS min_event_time,
+                        MAX({self.event_time_column}) AS max_event_time,
                         COUNT(*) AS row_count
                     FROM {self.buffer_table_name}
-                    WHERE {self.event_time_column_utc} IS NOT NULL
+                    WHERE {self.event_time_column} IS NOT NULL
                     """
                 )
 
@@ -346,8 +338,8 @@ class KafkaReplayProducer:
                 logger.debug(
                     "Buffer table stats | vehicle_type=%s | min_event_time=%s | max_event_time=%s | row_count=%s",
                     self.vehicle_type,
-                    stats_row[0],
-                    stats_row[1],
+                    format_log_dt(stats_row[0]),
+                    format_log_dt(stats_row[1]),
                     stats_row[2],
                 )
 
@@ -373,14 +365,14 @@ class KafkaReplayProducer:
             self.vehicle_type,
             self.topic_name,
             len(rows),
-            rows[0][self.event_time_column_utc],
-            rows[-1][self.event_time_column_utc],
+            format_log_dt(rows[0][self.event_time_column]),
+            format_log_dt(rows[-1][self.event_time_column]),
         )
 
         # since the input rows are sorted by time, the last row represents
         # the new highest watermark for this vehicle
         max_event_time = self._from_duckdb_timestamp_value(
-            rows[-1][self.event_time_column_utc]
+            rows[-1][self.event_time_column]
         )
         published_count = 0
 
@@ -420,8 +412,8 @@ class KafkaReplayProducer:
         serialized_row = {}
         for key, value in row.items():
             if isinstance(value, datetime):
-                if key.endswith("_utc") and value.tzinfo is None:
-                    value = value.replace(tzinfo=timezone.utc)
+                if value.tzinfo is None:
+                    value = value.replace(tzinfo=ZoneInfo("America/New_York"))
                 serialized_row[key] = value.isoformat()
             else:
                 serialized_row[key] = value

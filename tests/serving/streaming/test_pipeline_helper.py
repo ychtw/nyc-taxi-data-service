@@ -1,10 +1,13 @@
-from datetime import datetime, timezone
+from datetime import datetime
 from unittest.mock import Mock, call
+from zoneinfo import ZoneInfo
 
 from nyc_taxi_data_service.serving.streaming.pipeline import (
     _run_initial_buffering,
     _run_publish_cycle,
 )
+
+NY_TZ = ZoneInfo("America/New_York")
 
 
 def test_run_initial_buffering_calls_buffer_current_window_once_per_buffer() -> None:
@@ -61,7 +64,7 @@ def test_run_publish_cycle_calls_publish_available_once_per_producer() -> None:
         "yellow": yellow_producer,
         "green": green_producer,
     }
-    mimic_current_time = datetime(2025, 1, 15, 12, 0, tzinfo=timezone.utc)
+    mimic_current_time = datetime(2025, 1, 15, 12, 0, tzinfo=NY_TZ)
 
     _run_publish_cycle(
         replay_producers=replay_producers,
@@ -87,7 +90,7 @@ def test_run_publish_cycle_passes_same_mimic_current_time_to_all_producers() -> 
         "green": green_producer,
         "fhv": fhv_producer,
     }
-    mimic_current_time = datetime(2025, 2, 1, 8, 30, tzinfo=timezone.utc)
+    mimic_current_time = datetime(2025, 2, 1, 8, 30, tzinfo=NY_TZ)
 
     _run_publish_cycle(
         replay_producers=replay_producers,
@@ -112,5 +115,5 @@ def test_run_publish_cycle_does_nothing_for_empty_replay_producers() -> None:
     """Do nothing when no replay producers are configured."""
     _run_publish_cycle(
         replay_producers={},
-        mimic_current_time=datetime(2025, 1, 1, tzinfo=timezone.utc),
+        mimic_current_time=datetime(2025, 1, 1, tzinfo=NY_TZ),
     )

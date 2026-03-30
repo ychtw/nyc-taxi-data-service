@@ -1,8 +1,11 @@
 from datetime import datetime
+from zoneinfo import ZoneInfo
 
 import pytest
 
 from tests.helpers.kafka_producer_test_helpers import build_producer
+
+NY_TZ = ZoneInfo("America/New_York")
 
 
 def test_publish_available_returns_zero_when_no_rows(
@@ -25,7 +28,7 @@ def test_publish_available_returns_zero_when_no_rows(
 
     # set a non-None watermark first so the test can confirm that the value
     # remains unchanged when no eligible rows are returned
-    existing_watermark = datetime(2025, 3, 1, 0, 10, 0)
+    existing_watermark = datetime(2025, 3, 1, 0, 10, 0, tzinfo=NY_TZ)
     producer._replay_watermark = existing_watermark
 
     # replace _fetch_eligible_rows() with a stub that simulates an empty replay
@@ -40,7 +43,7 @@ def test_publish_available_returns_zero_when_no_rows(
     # patch _publish_rows() so the test explicitly verifies it is skipped
     monkeypatch.setattr(producer, "_publish_rows", fail_if_called)
 
-    mimic_current_time = datetime(2025, 3, 1, 0, 15, 0)
+    mimic_current_time = datetime(2025, 3, 1, 0, 15, 0, tzinfo=NY_TZ)
 
     result = producer.publish_available(mimic_current_time)
 
@@ -67,12 +70,12 @@ def test_publish_available_publishes_rows_and_updates_watermark(
         mimic_service_start_time=mimic_service_start_time,
     )
 
-    mimic_current_time = datetime(2025, 3, 1, 0, 20, 0)
+    mimic_current_time = datetime(2025, 3, 1, 0, 20, 0, tzinfo=NY_TZ)
     fetched_rows = [
         {"lpep_dropoff_datetime": datetime(2025, 3, 1, 0, 5, 0)},
         {"lpep_dropoff_datetime": datetime(2025, 3, 1, 0, 10, 0)},
     ]
-    max_event_time = datetime(2025, 3, 1, 0, 10, 0)
+    max_event_time = datetime(2025, 3, 1, 0, 10, 0, tzinfo=NY_TZ)
 
     # capture the value passed into _fetch_eligible_rows() so the test can
     # verify that publish_available() forwards mimic_current_time correctly
@@ -132,12 +135,12 @@ def test_publish_available_sets_initial_watermark_after_first_successful_publish
     fetched_rows = [
         {"dropOff_datetime": datetime(2025, 3, 1, 0, 0, 0)},
     ]
-    max_event_time = datetime(2025, 3, 1, 0, 0, 0)
+    max_event_time = datetime(2025, 3, 1, 0, 0, 0, tzinfo=NY_TZ)
 
     monkeypatch.setattr(producer, "_fetch_eligible_rows", lambda _: fetched_rows)
     monkeypatch.setattr(producer, "_publish_rows", lambda rows: (1, max_event_time))
 
-    result = producer.publish_available(datetime(2025, 3, 1, 0, 1, 0))
+    result = producer.publish_available(datetime(2025, 3, 1, 0, 1, 0, tzinfo=NY_TZ))
 
     # verify the first successful publish returns the published count
     assert result == 1

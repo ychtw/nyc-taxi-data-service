@@ -2,11 +2,13 @@ import logging
 import re
 import time
 from datetime import date, datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 from nyc_taxi_data_service.config.config_loader import (
     load_runtime_config,
     resolve_runtime_config,
 )
+from nyc_taxi_data_service.serving.common.log_time import format_log_dt
 from nyc_taxi_data_service.serving.common.service_clock import ServiceClock
 from nyc_taxi_data_service.serving.streaming.kafka_admin import (
     ensure_streaming_topics_exist,
@@ -116,7 +118,7 @@ def _parse_publish_interval(
 
 def _resolve_stream_timing_config(
     resolved_runtime_config: dict,
-) -> tuple[timedelta, timedelta]:
+) -> tuple[timedelta, timedelta, timedelta]:
     """
     Resolve window size, retention, and publish interval from the runtime config.
 
@@ -223,7 +225,7 @@ def _run_publish_cycle(
     """
     logger.debug(
         "Publish cycle | mimic_current_time=%s | vehicle_types=%s",
-        mimic_current_time,
+        format_log_dt(mimic_current_time),
         list(replay_producers),
     )
     for replay_producer in replay_producers.values():
@@ -238,19 +240,20 @@ def _build_stream_exhaustion_boundary(
 
     The runtime config defines the available source range at month granularity
     via `time_frame.end_year_month` in "YYYY-MM" format. This helper converts
-    that month into the first instant of the following month, which acts as
-    the exclusive upper bound for event times that may appear in the stream.
+    that month into the first instant of the following month in
+    `America/New_York`, which acts as the exclusive upper bound for event
+    times that may appear in the stream.
 
     Example:
         end_year_month = "2025-03"
-        -> boundary = 2025-04-01 00:00:00
+        -> boundary = 2025-04-01 00:00:00-04:00
 
     Args:
         resolved_runtime_config: Fully resolved runtime config dictionary.
 
     Returns:
-        A timezone-aware UTC datetime representing the exclusive upper bound
-        of streamable event time.
+        A timezone-aware `America/New_York` datetime representing the exclusive
+        upper bound of streamable event time.
     """
     end_year_month = resolved_runtime_config["time_frame"]["end_year_month"]
 
@@ -273,10 +276,12 @@ def _build_stream_exhaustion_boundary(
             "Invalid time_frame.end_year_month value. Month must be between 01 and 12."
         )
 
-    if month == 12:
-        return datetime(year + 1, 1, 1, tzinfo=timezone.utc)
+    service_tz = ZoneInfo("America/New_York")
 
-    return datetime(year, month + 1, 1, tzinfo=timezone.utc)
+    if month == 12:
+        return datetime(year + 1, 1, 1, tzinfo=service_tz)
+
+    return datetime(year, month + 1, 1, tzinfo=service_tz)
 
 
 def run_streaming(resolved_runtime_config: dict) -> None:
@@ -298,7 +303,9 @@ def run_streaming(resolved_runtime_config: dict) -> None:
 
     # build the upper bound time (exclusive) of streaming service
     stream_end_time = _build_stream_exhaustion_boundary(resolved_runtime_config)
-    logger.debug("Streaming upper bound (exclusive): %s", stream_end_time)
+    logger.debug(
+        "Streaming upper bound (exclusive): %s", format_log_dt(stream_end_time)
+    )
 
     # get 2 timing controls used by the streaming service:
     # - window_size: how much source data each buffer-fill query stages into DuckDB
@@ -319,8 +326,9 @@ def run_streaming(resolved_runtime_config: dict) -> None:
     service_clock = ServiceClock(mimic_current_date=mimic_current_date)
     mimic_service_start_time = service_clock.mimic_service_start_time
     logger.info(
-        "Service clock started | mimic_service_start_time=%s",
-        mimic_service_start_time,
+        "Service clock started | real_service_start_time=%s | mimic_service_start_time=%s",
+        format_log_dt(service_clock.real_service_start_time),
+        format_log_dt(mimic_service_start_time),
     )
 
     # configure vehicle types for this streaming run
@@ -398,8 +406,8 @@ def run_streaming(resolved_runtime_config: dict) -> None:
                     logger.debug(
                         "Buffer-ahead check triggered buffering | vehicle_type=%s | mimic_current_time=%s | next_window_start=%s",
                         window_buffer.vehicle_type,
-                        mimic_current_time,
-                        window_start,
+                        format_log_dt(mimic_current_time),
+                        format_log_dt(window_start),
                     )
                     window_buffer.buffer_current_window()
                     # remove rows older than retention to prevent unbounded buffer growth
@@ -412,9 +420,9 @@ def run_streaming(resolved_runtime_config: dict) -> None:
             if now >= next_publish_at:
                 logger.debug(
                     "Scheduled publish triggered | now=%s | next_publish_at=%s | mimic_current_time=%s",
-                    now,
-                    next_publish_at,
-                    mimic_current_time,
+                    format_log_dt(now),
+                    format_log_dt(next_publish_at),
+                    format_log_dt(mimic_current_time),
                 )
 
                 # note: one publish cycle already attempts to send all rows eligible up to `mimic_current_time`

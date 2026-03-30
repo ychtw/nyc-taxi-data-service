@@ -1,18 +1,26 @@
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import duckdb
 import polars as pl
 import pytest
 from fastapi import HTTPException
 
-from nyc_taxi_data_service.serving.api.service import HistoricalApiService
+from nyc_taxi_data_service.serving.api.service import (
+    HistoricalApiService,
+)
+
+NY_TZ = ZoneInfo("America/New_York")
 
 
 @pytest.fixture
 def api_test_data_dir(tmp_path: Path) -> Path:
     """
     Create a minimal parquet layout that matches the API's expected glob pattern.
+
+    The TLC-style event-time column is written as naive New York-local timestamps
+    so it matches the service's DuckDB query semantics.
     """
     data_dir = tmp_path / "yellow" / "year=2025" / "month=01"
     data_dir.mkdir(parents=True)
@@ -20,23 +28,17 @@ def api_test_data_dir(tmp_path: Path) -> Path:
     rows = [
         {
             "vendor_id": 1,
-            "tpep_dropoff_datetime": datetime(
-                2025, 1, 15, 9, 0, 0, tzinfo=timezone.utc
-            ),
+            "tpep_dropoff_datetime": datetime(2025, 1, 15, 9, 0, 0),
             "fare_amount": 12.5,
         },
         {
             "vendor_id": 2,
-            "tpep_dropoff_datetime": datetime(
-                2025, 1, 15, 9, 0, 30, tzinfo=timezone.utc
-            ),
+            "tpep_dropoff_datetime": datetime(2025, 1, 15, 9, 0, 30),
             "fare_amount": 18.0,
         },
         {
             "vendor_id": 1,
-            "tpep_dropoff_datetime": datetime(
-                2025, 1, 15, 9, 1, 0, tzinfo=timezone.utc
-            ),
+            "tpep_dropoff_datetime": datetime(2025, 1, 15, 9, 1, 0),
             "fare_amount": 25.0,
         },
     ]
@@ -87,7 +89,7 @@ def duckdb_connection():
 
 def test_get_vehicle_event_time_column_returns_expected_column(
     api_service: HistoricalApiService,
-):
+) -> None:
     """
     Return the configured event time column for a supported vehicle type.
     """
@@ -97,7 +99,7 @@ def test_get_vehicle_event_time_column_returns_expected_column(
 
 def test_get_vehicle_event_time_column_raises_for_unsupported_vehicle_type(
     api_service: HistoricalApiService,
-):
+) -> None:
     """
     Raise an HTTP 400 error when the vehicle type is not configured.
     """
@@ -111,7 +113,7 @@ def test_get_vehicle_event_time_column_raises_for_unsupported_vehicle_type(
 def test_get_parquet_path_builds_expected_glob(
     api_service: HistoricalApiService,
     api_test_data_dir: Path,
-):
+) -> None:
     """
     Build the parquet glob path from storage base path and vehicle type.
     """
@@ -121,39 +123,53 @@ def test_get_parquet_path_builds_expected_glob(
     assert result == expected
 
 
-def test_normalize_request_datetime_interprets_naive_datetime_as_utc(
+def test_normalize_request_datetime_interprets_naive_datetime_as_new_york_time(
     api_service: HistoricalApiService,
-):
+) -> None:
     """
-    Interpret a naive request datetime as a timezone-aware UTC datetime.
+    Interpret a naive request datetime as a timezone-aware New York datetime.
     """
     dt = datetime(2025, 1, 15, 9, 0, 0)
 
     result = api_service.normalize_request_datetime(dt, "start_time")
 
-    assert result == datetime(2025, 1, 15, 9, 0, 0, tzinfo=timezone.utc)
+    assert result == datetime(2025, 1, 15, 9, 0, 0, tzinfo=NY_TZ)
 
 
-def test_normalize_request_datetime_converts_aware_datetime_to_utc(
+def test_normalize_request_datetime_converts_aware_datetime_to_new_york_time(
     api_service: HistoricalApiService,
-):
+) -> None:
     """
-    Convert a timezone-aware request datetime to UTC.
+    Convert a timezone-aware request datetime into New York time.
     """
     dt = datetime.fromisoformat("2025-01-15T17:00:00+08:00")
 
     result = api_service.normalize_request_datetime(dt, "start_time")
 
-    assert result == datetime(2025, 1, 15, 9, 0, 0, tzinfo=timezone.utc)
+    assert result == datetime(2025, 1, 15, 4, 0, 0, tzinfo=NY_TZ)
+
+
+def test_to_duckdb_timestamp_value_returns_naive_new_york_local_datetime(
+    api_service: HistoricalApiService,
+) -> None:
+    """
+    Convert a service-layer New York datetime into a naive DuckDB timestamp value.
+    """
+    dt = datetime(2025, 1, 15, 9, 0, 0, tzinfo=NY_TZ)
+
+    result = api_service.to_duckdb_timestamp_value(dt)
+
+    assert result == datetime(2025, 1, 15, 9, 0, 0)
+    assert result.tzinfo is None
 
 
 def test_get_available_through_returns_mimic_current_time(
     api_service: HistoricalApiService,
-):
+) -> None:
     """
     Return mimic_current_time unchanged for the initial API availability behavior.
     """
-    mimic_current_time = datetime(2025, 1, 15, 9, 30, 0, tzinfo=timezone.utc)
+    mimic_current_time = datetime(2025, 1, 15, 9, 30, 0, tzinfo=NY_TZ)
 
     result = api_service.get_available_through(mimic_current_time=mimic_current_time)
 
@@ -162,29 +178,29 @@ def test_get_available_through_returns_mimic_current_time(
 
 def test_validate_request_window_accepts_valid_inputs(
     api_service: HistoricalApiService,
-):
+) -> None:
     """
     Accept a request window when the time bounds, availability boundary, and limit are valid.
     """
     api_service.validate_request_window(
-        start_time=datetime(2025, 1, 15, 9, 0, 0, tzinfo=timezone.utc),
-        end_time=datetime(2025, 1, 15, 9, 1, 0, tzinfo=timezone.utc),
-        available_through=datetime(2025, 1, 15, 9, 30, 0, tzinfo=timezone.utc),
+        start_time=datetime(2025, 1, 15, 9, 0, 0, tzinfo=NY_TZ),
+        end_time=datetime(2025, 1, 15, 9, 1, 0, tzinfo=NY_TZ),
+        available_through=datetime(2025, 1, 15, 9, 30, 0, tzinfo=NY_TZ),
         limit=10,
     )
 
 
 def test_validate_request_window_raises_when_start_time_is_not_earlier_than_end_time(
     api_service: HistoricalApiService,
-):
+) -> None:
     """
     Raise an HTTP 400 error when the request window is empty or reversed.
     """
     with pytest.raises(HTTPException) as exc_info:
         api_service.validate_request_window(
-            start_time=datetime(2025, 1, 15, 9, 1, 0, tzinfo=timezone.utc),
-            end_time=datetime(2025, 1, 15, 9, 1, 0, tzinfo=timezone.utc),
-            available_through=datetime(2025, 1, 15, 9, 30, 0, tzinfo=timezone.utc),
+            start_time=datetime(2025, 1, 15, 9, 1, 0, tzinfo=NY_TZ),
+            end_time=datetime(2025, 1, 15, 9, 1, 0, tzinfo=NY_TZ),
+            available_through=datetime(2025, 1, 15, 9, 30, 0, tzinfo=NY_TZ),
             limit=10,
         )
 
@@ -194,15 +210,15 @@ def test_validate_request_window_raises_when_start_time_is_not_earlier_than_end_
 
 def test_validate_request_window_raises_when_limit_is_not_positive(
     api_service: HistoricalApiService,
-):
+) -> None:
     """
     Raise an HTTP 400 error when the requested limit is zero or negative.
     """
     with pytest.raises(HTTPException) as exc_info:
         api_service.validate_request_window(
-            start_time=datetime(2025, 1, 15, 9, 0, 0, tzinfo=timezone.utc),
-            end_time=datetime(2025, 1, 15, 9, 1, 0, tzinfo=timezone.utc),
-            available_through=datetime(2025, 1, 15, 9, 30, 0, tzinfo=timezone.utc),
+            start_time=datetime(2025, 1, 15, 9, 0, 0, tzinfo=NY_TZ),
+            end_time=datetime(2025, 1, 15, 9, 1, 0, tzinfo=NY_TZ),
+            available_through=datetime(2025, 1, 15, 9, 30, 0, tzinfo=NY_TZ),
             limit=0,
         )
 
@@ -212,28 +228,28 @@ def test_validate_request_window_raises_when_limit_is_not_positive(
 
 def test_validate_request_window_raises_when_end_time_exceeds_available_range(
     api_service: HistoricalApiService,
-):
+) -> None:
     """
     Raise an HTTP 400 error when the requested end_time exceeds API availability.
     """
     with pytest.raises(HTTPException) as exc_info:
         api_service.validate_request_window(
-            start_time=datetime(2025, 1, 15, 9, 0, 0, tzinfo=timezone.utc),
-            end_time=datetime(2025, 1, 15, 9, 31, 0, tzinfo=timezone.utc),
-            available_through=datetime(2025, 1, 15, 9, 30, 0, tzinfo=timezone.utc),
+            start_time=datetime(2025, 1, 15, 9, 0, 0, tzinfo=NY_TZ),
+            end_time=datetime(2025, 1, 15, 9, 31, 0, tzinfo=NY_TZ),
+            available_through=datetime(2025, 1, 15, 9, 30, 0, tzinfo=NY_TZ),
             limit=10,
         )
 
     assert exc_info.value.status_code == 400
     assert exc_info.value.detail == (
-        "end_time exceeds currently available API range: 2025-01-15T09:30:00+00:00"
+        "end_time exceeds currently available API range: 2025-01-15T09:30:00-05:00"
     )
 
 
 def test_get_trips_returns_expected_rows(
     api_service: HistoricalApiService,
     duckdb_connection: duckdb.DuckDBPyConnection,
-):
+) -> None:
     """
     Return matching trip rows and preserve request metadata for a valid query.
     """
@@ -242,28 +258,28 @@ def test_get_trips_returns_expected_rows(
         start_time=datetime(2025, 1, 15, 9, 0, 0),
         end_time=datetime(2025, 1, 15, 9, 1, 0),
         limit=10,
-        mimic_current_time=datetime(2025, 1, 15, 9, 30, 0, tzinfo=timezone.utc),
+        mimic_current_time=datetime(2025, 1, 15, 9, 30, 0, tzinfo=NY_TZ),
         con=duckdb_connection,
     )
 
     assert payload["vehicle_type"] == "yellow"
     assert payload["limit"] == 10
-    assert payload["start_time"] == datetime(2025, 1, 15, 9, 0, 0, tzinfo=timezone.utc)
-    assert payload["end_time"] == datetime(2025, 1, 15, 9, 1, 0, tzinfo=timezone.utc)
+    assert payload["start_time"] == datetime(2025, 1, 15, 9, 0, 0, tzinfo=NY_TZ)
+    assert payload["end_time"] == datetime(2025, 1, 15, 9, 1, 0, tzinfo=NY_TZ)
     assert payload["mimic_current_time"] == datetime(
-        2025, 1, 15, 9, 30, 0, tzinfo=timezone.utc
+        2025, 1, 15, 9, 30, 0, tzinfo=NY_TZ
     )
     assert len(payload["rows"]) == 2
     assert [row["tpep_dropoff_datetime"] for row in payload["rows"]] == [
-        datetime(2025, 1, 15, 9, 0, 0, tzinfo=timezone.utc),
-        datetime(2025, 1, 15, 9, 0, 30, tzinfo=timezone.utc),
+        datetime(2025, 1, 15, 9, 0, 0),
+        datetime(2025, 1, 15, 9, 0, 30),
     ]
 
 
 def test_get_trips_returns_empty_rows_when_no_records_match(
     api_service: HistoricalApiService,
     duckdb_connection: duckdb.DuckDBPyConnection,
-):
+) -> None:
     """
     Return an empty rows list when the query is valid but no records match.
     """
@@ -272,7 +288,7 @@ def test_get_trips_returns_empty_rows_when_no_records_match(
         start_time=datetime(2025, 1, 15, 8, 0, 0),
         end_time=datetime(2025, 1, 15, 8, 1, 0),
         limit=10,
-        mimic_current_time=datetime(2025, 1, 15, 9, 30, 0, tzinfo=timezone.utc),
+        mimic_current_time=datetime(2025, 1, 15, 9, 30, 0, tzinfo=NY_TZ),
         con=duckdb_connection,
     )
 
@@ -282,7 +298,7 @@ def test_get_trips_returns_empty_rows_when_no_records_match(
 def test_get_trips_respects_limit(
     api_service: HistoricalApiService,
     duckdb_connection: duckdb.DuckDBPyConnection,
-):
+) -> None:
     """
     Return no more than the requested number of rows.
     """
@@ -291,7 +307,7 @@ def test_get_trips_respects_limit(
         start_time=datetime(2025, 1, 15, 9, 0, 0),
         end_time=datetime(2025, 1, 15, 9, 2, 0),
         limit=1,
-        mimic_current_time=datetime(2025, 1, 15, 9, 30, 0, tzinfo=timezone.utc),
+        mimic_current_time=datetime(2025, 1, 15, 9, 30, 0, tzinfo=NY_TZ),
         con=duckdb_connection,
     )
 
@@ -302,7 +318,7 @@ def test_get_trips_respects_limit(
 def test_get_trips_raises_when_end_time_exceeds_available_range(
     api_service: HistoricalApiService,
     duckdb_connection: duckdb.DuckDBPyConnection,
-):
+) -> None:
     """
     Raise an HTTP 400 error when the requested query exceeds API availability.
     """
@@ -312,11 +328,11 @@ def test_get_trips_raises_when_end_time_exceeds_available_range(
             start_time=datetime(2025, 1, 15, 9, 0, 0),
             end_time=datetime(2025, 1, 15, 9, 31, 0),
             limit=10,
-            mimic_current_time=datetime(2025, 1, 15, 9, 30, 0, tzinfo=timezone.utc),
+            mimic_current_time=datetime(2025, 1, 15, 9, 30, 0, tzinfo=NY_TZ),
             con=duckdb_connection,
         )
 
     assert exc_info.value.status_code == 400
     assert exc_info.value.detail == (
-        "end_time exceeds currently available API range: 2025-01-15T09:30:00+00:00"
+        "end_time exceeds currently available API range: 2025-01-15T09:30:00-05:00"
     )
