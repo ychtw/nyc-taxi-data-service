@@ -1,9 +1,12 @@
-from datetime import datetime, timezone
+from datetime import datetime
 from unittest.mock import sentinel
+from zoneinfo import ZoneInfo
 
 from nyc_taxi_data_service.serving.streaming.pipeline import (
     _build_streaming_components,
 )
+
+NY_TZ = ZoneInfo("America/New_York")
 
 
 def test_build_streaming_components_creates_window_buffer_and_replay_producer(
@@ -32,7 +35,7 @@ def test_build_streaming_components_creates_window_buffer_and_replay_producer(
 
     # minimal shared inputs needed by the helper under test.
     resolved_runtime_config = {"some": "config"}
-    mimic_service_start_time = datetime(2025, 1, 15, 12, 0, tzinfo=timezone.utc)
+    mimic_service_start_time = datetime(2025, 1, 15, 12, 0, tzinfo=NY_TZ)
 
     # call the function under test
     # notes: because both classes were patched above, this call will NOT create real
@@ -78,7 +81,7 @@ def test_build_streaming_components_passes_vehicle_type_through_to_both_componen
     )
 
     resolved_runtime_config = {"some": "config"}
-    mimic_service_start_time = datetime(2025, 1, 15, 12, 0, tzinfo=timezone.utc)
+    mimic_service_start_time = datetime(2025, 1, 15, 12, 0, tzinfo=NY_TZ)
 
     # use a specific vehicle type and let the helper call the mocked constructors
     _build_streaming_components(
@@ -114,7 +117,7 @@ def test_build_streaming_components_passes_shared_start_time_to_both_components(
 
     # use a distinctive timestamp so it is easy to confirm the exact same value
     # is passed into both constructors
-    mimic_service_start_time = datetime(2025, 2, 1, 8, 30, tzinfo=timezone.utc)
+    mimic_service_start_time = datetime(2025, 2, 1, 8, 30, tzinfo=NY_TZ)
 
     _build_streaming_components(
         vehicle_type="fhv",

@@ -3,7 +3,6 @@ import re
 import textwrap
 from datetime import datetime, timedelta
 from pathlib import Path
-from zoneinfo import ZoneInfo
 
 import duckdb
 
@@ -114,6 +113,11 @@ def _parse_buffer_duration(raw_value: str, field_name: str) -> timedelta:
 class StreamingWindowBuffer:
     """
     Stage streaming windows for one vehicle type into a per-vehicle DuckDB buffer.
+
+    Service-level streaming window boundaries are tracked as timezone-aware
+    `America/New_York` datetimes. Before querying TLC parquet data, those
+    boundaries are converted into naive New York-local datetimes so they match
+    the raw event-time columns stored in the source files.
     """
 
     def __init__(
@@ -143,9 +147,8 @@ class StreamingWindowBuffer:
             resolved_runtime_config: Resolved runtime configuration containing
                 serving and storage settings.
             mimic_service_start_time: Initial start timestamp for the first
-                streaming query window. This is usually derived once from the
-                shared service clock and passed in so all vehicle buffers begin
-                from the same service-time boundary.
+                streaming query window. This should be a timezone-aware
+                `America/New_York` datetime from the shared service clock.
         """
         # general settings
         buffer_cfg = resolved_runtime_config["serving"]["streaming"]["buffer"]
@@ -165,7 +168,6 @@ class StreamingWindowBuffer:
         self.event_time_column = resolved_runtime_config["serving"][
             "service_event_time_column_by_vehicle_type"
         ][vehicle_type]
-        self.event_time_column_utc = f"{self.event_time_column}_utc"
         self.vehicle_data_path = (
             Path(resolved_runtime_config["storage"]["target_base_path"]) / vehicle_type
         )
@@ -177,7 +179,7 @@ class StreamingWindowBuffer:
         )
 
         # streaming progress state: start the first query window at the
-        # provided mimic service start time
+        # provided mimic service start time (which is in aware New York time)
         self._next_window_start = mimic_service_start_time
 
         # initialize a duckdb database
@@ -190,15 +192,13 @@ class StreamingWindowBuffer:
         Any existing buffer database file at the same path is removed first so
         each service run starts from a clean state.
         """
-        # ensure the directory exists
         self.buffer_db_path.parent.mkdir(parents=True, exist_ok=True)
 
-        # if the file exists, delete it to ensure a clean state (idempotency)
         if self.buffer_db_path.exists():
             self.buffer_db_path.unlink()
 
         # open and close a connection once so DuckDB creates the database file
-        with duckdb.connect(str(self.buffer_db_path)) as con:
+        with duckdb.connect(str(self.buffer_db_path)):
             pass
 
     def get_current_window(self) -> tuple[datetime, datetime]:
@@ -210,7 +210,7 @@ class StreamingWindowBuffer:
 
         Returns:
             A `(window_start, window_end)` tuple representing the current
-            streaming query window.
+            streaming query window as timezone-aware New York datetimes.
         """
         start = self._next_window_start
         end = start + self.window_size
@@ -245,18 +245,26 @@ class StreamingWindowBuffer:
             return False
 
     @staticmethod
-    def _to_nyc_local_timestamp_value(dt: datetime) -> datetime:
+    def _to_duckdb_timestamp_value(dt: datetime) -> datetime:
         """
-        Convert an aware UTC datetime into a naive America/New_York datetime for
-        filtering against raw TLC event-time columns.
+        Convert a service-layer datetime into a naive timestamp value for DuckDB.
 
-        TLC parquet timestamps are stored without timezone information but are
-        interpreted as New York local time. This helper converts service-level UTC
-        window boundaries into naive New York local datetimes so the buffer query
-        selects the correct source rows.
+        TLC parquet event-time columns are stored without timezone information
+        but are interpreted by this project as New York local time. This helper
+        converts a timezone-aware New York datetime into a naive datetime with
+        the same local wall-clock value so it can be compared against those raw
+        event-time columns in DuckDB.
+
+        Args:
+            dt: Datetime boundary from service-layer logic.
+
+        Returns:
+            A naive New York-local datetime suitable for DuckDB TIMESTAMP
+            comparisons against TLC event-time columns.
         """
-        nyc_dt = dt.astimezone(ZoneInfo("America/New_York"))
-        return nyc_dt.replace(tzinfo=None)
+        if dt.tzinfo is None:
+            return dt
+        return dt.replace(tzinfo=None)
 
     def buffer_current_window(self) -> int:
         """
@@ -272,38 +280,28 @@ class StreamingWindowBuffer:
             Number of rows buffered for this window.
             Returns 0 if the window contains no matching records.
         """
+        # get the window boundary and convert to naive datetime for query
         window_start, window_end = self.get_current_window()
-        window_start_local = self._to_nyc_local_timestamp_value(window_start)
-        window_end_local = self._to_nyc_local_timestamp_value(window_end)
+        query_window_start = self._to_duckdb_timestamp_value(window_start)
+        query_window_end = self._to_duckdb_timestamp_value(window_end)
 
         # define required info for query
         parquet_path = str(self.vehicle_data_path / "year=*" / "month=*" / "*.parquet")
 
         # query for data within the current window and save to the buffer table in the buffer database
-        # note: TLC event timestamps are stored as New York local time without timezone metadata.
-        # Filter source rows using that local-time column, and also materialize a UTC-normalized
-        # event-time column for downstream replay and watermark comparisons against the UTC-based ServiceClock.
         with duckdb.connect(str(self.buffer_db_path)) as con:
             # create a temp table to materialize the filtered data
             query = textwrap.dedent(
                 f"""
                     CREATE OR REPLACE TEMP TABLE temp_window AS
-                    SELECT 
-                        *,
-                        timezone(
-                            'UTC',
-                            timezone(
-                                'America/New_York',
-                                {self.event_time_column}
-                            )
-                        ) AS {self.event_time_column_utc}
+                    SELECT *
                     FROM read_parquet(?)
                     WHERE {self.event_time_column} >= ?
                     AND {self.event_time_column} < ?
-                    ORDER BY {self.event_time_column_utc} ASC
+                    ORDER BY {self.event_time_column} ASC
                 """
             )
-            query_params = [parquet_path, window_start_local, window_end_local]
+            query_params = [parquet_path, query_window_start, query_window_end]
             con.execute(query, query_params)
 
             # get count from the temp table (avoid scanning parquet files)
@@ -315,8 +313,8 @@ class StreamingWindowBuffer:
                 # logger.debug(
                 #     "Buffer window | vehicle_type=%s | row_count=0 | window_start_inclusive=%s | window_end_exclusive=%s",
                 #     self.vehicle_type,
-                #     window_start,
-                #     window_end,
+                #     query_window_start,
+                #     query_window_end,
                 # )
                 return 0
 
@@ -350,18 +348,21 @@ class StreamingWindowBuffer:
         """
         Delete expired rows from the DuckDB buffer table for this vehicle type.
 
-        A row is considered expired when its normalized UTC event-time value is
-        older than `mimic_current_time - self.retention`.
+        A row is considered expired when its raw TLC event-time value is older
+        than `mimic_current_time - self.retention`, using New York-local service
+        time semantics.
 
         Args:
-            mimic_current_time: Current service time in UTC, supplied by the
-                streaming service loop.
+            mimic_current_time: Current service time supplied by the streaming
+                service loop as a timezone-aware New York datetime.
 
         Returns:
             Number of rows deleted from the buffer table.
             Returns 0 if the buffer table does not exist or no rows are expired.
         """
-        retention_cutoff = mimic_current_time - self.retention
+        retention_cutoff = self._to_duckdb_timestamp_value(
+            mimic_current_time - self.retention
+        )
 
         with duckdb.connect(str(self.buffer_db_path)) as con:
             if not self._table_exists(con, self.buffer_table_name):
@@ -369,7 +370,7 @@ class StreamingWindowBuffer:
 
             query = f"""
                 DELETE FROM {self.buffer_table_name}
-                WHERE {self.event_time_column_utc} < ?
+                WHERE {self.event_time_column} < ?
                 RETURNING 1
             """
             query_params = [retention_cutoff]

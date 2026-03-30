@@ -1,16 +1,19 @@
-from datetime import datetime, timezone
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 import pytest
 
 from tests.helpers.kafka_producer_test_helpers import (
     build_producer,
     create_buffer_table_and_insert_rows,
-    nyc_local_to_utc_naive,
 )
+
+NY_TZ = ZoneInfo("America/New_York")
 
 
 @pytest.fixture
 def ny_local_times() -> list[datetime]:
+    """Provide naive New York-local event-time values for buffer-table test rows."""
     return [
         datetime(2025, 3, 1, 0, 0, 0),
         datetime(2025, 3, 1, 0, 1, 0),
@@ -52,24 +55,20 @@ def test_fetch_eligible_rows_includes_start_time_on_first_fetch(
         create_table_sql=f"""
             CREATE TABLE {producer.buffer_table_name} (
                 vendor_id INTEGER,
-                {producer.event_time_column} TIMESTAMP,
-                {producer.event_time_column_utc} TIMESTAMP
+                {producer.event_time_column} TIMESTAMP
             )
             """,
         insert_sql=f"""
             INSERT INTO {producer.buffer_table_name}
             VALUES
-                (1, ?, ?),  -- exactly at mimic_service_start_time: should be included
-                (2, ?, ?),  -- inside the window: should be included
-                (3, ?, ?)   -- after mimic_current_time: should be excluded
+                (1, ?),  -- exactly at mimic_service_start_time: should be included
+                (2, ?),  -- inside the window: should be included
+                (3, ?)   -- after mimic_current_time: should be excluded
             """,
         insert_sql_params=[
             ny_local_times[0],
-            nyc_local_to_utc_naive(ny_local_times[0]),
             ny_local_times[5],
-            nyc_local_to_utc_naive(ny_local_times[5]),
             ny_local_times[11],
-            nyc_local_to_utc_naive(ny_local_times[11]),
         ],
     )
 
@@ -79,7 +78,7 @@ def test_fetch_eligible_rows_includes_start_time_on_first_fetch(
 
     # query rows up to 00:10 so the row at 00:11 stays outside the replay window
     rows = producer._fetch_eligible_rows(
-        mimic_current_time=datetime(2025, 3, 1, 5, 10, 0, tzinfo=timezone.utc)
+        mimic_current_time=datetime(2025, 3, 1, 0, 10, 0, tzinfo=NY_TZ)
     )
 
     # verify that the first-fetch branch includes the row exactly equal to the
@@ -112,34 +111,30 @@ def test_fetch_eligible_rows_excludes_replay_watermark_on_later_fetch(
         create_table_sql=f"""
             CREATE TABLE {producer.buffer_table_name} (
                 vendor_id INTEGER,
-                {producer.event_time_column} TIMESTAMP,
-                {producer.event_time_column_utc} TIMESTAMP
+                {producer.event_time_column} TIMESTAMP
             )
             """,
         insert_sql=f"""
             INSERT INTO {producer.buffer_table_name}
             VALUES
-                (1, ?, ?),  -- exactly at replay watermark: should be excluded
-                (2, ?, ?),  -- above watermark and within upper bound: included
-                (3, ?, ?)   -- exactly at upper bound: included
+                (1, ?),  -- exactly at replay watermark: should be excluded
+                (2, ?),  -- above watermark and within upper bound: included
+                (3, ?)   -- exactly at upper bound: included
             """,
         insert_sql_params=[
             ny_local_times[5],
-            nyc_local_to_utc_naive(ny_local_times[5]),
             ny_local_times[6],
-            nyc_local_to_utc_naive(ny_local_times[6]),
             ny_local_times[10],
-            nyc_local_to_utc_naive(ny_local_times[10]),
         ],
     )
 
     # switch the producer into the later-fetch branch by setting an existing
     # replay watermark
-    producer._replay_watermark = datetime(2025, 3, 1, 5, 5, 0, tzinfo=timezone.utc)
+    producer._replay_watermark = datetime(2025, 3, 1, 0, 5, 0, tzinfo=NY_TZ)
 
     # query a later replay window where the lower bound should now be exclusive
     rows = producer._fetch_eligible_rows(
-        mimic_current_time=datetime(2025, 3, 1, 5, 10, 0, tzinfo=timezone.utc)
+        mimic_current_time=datetime(2025, 3, 1, 0, 10, 0, tzinfo=NY_TZ)
     )
 
     # verify that the replay watermark itself is excluded while later rows
@@ -171,25 +166,22 @@ def test_fetch_eligible_rows_excludes_null_event_times(
         create_table_sql=f"""
             CREATE TABLE {producer.buffer_table_name} (
                 dispatching_base_num VARCHAR,
-                {producer.event_time_column} TIMESTAMP,
-                {producer.event_time_column_utc} TIMESTAMP
+                {producer.event_time_column} TIMESTAMP
             )
             """,
         insert_sql=f"""
             INSERT INTO {producer.buffer_table_name}
             VALUES
-                ('B1', ?, NULL),  -- should be excluded by IS NOT NULL
-                ('B2', ?, ?)      -- should be included
+                ('B1', NULL),  -- should be excluded by IS NOT NULL
+                ('B2', ?)      -- should be included
             """,
         insert_sql_params=[
-            ny_local_times[1],
             ny_local_times[3],
-            nyc_local_to_utc_naive(ny_local_times[3]),
         ],
     )
 
     rows = producer._fetch_eligible_rows(
-        mimic_current_time=datetime(2025, 3, 1, 5, 10, 0, tzinfo=timezone.utc)
+        mimic_current_time=datetime(2025, 3, 1, 0, 10, 0, tzinfo=NY_TZ)
     )
 
     # verify that only the non-null event-time row is returned
@@ -220,31 +212,25 @@ def test_fetch_eligible_rows_returns_rows_in_ascending_event_time_order(
         create_table_sql=f"""
             CREATE TABLE {producer.buffer_table_name} (
                 trip_id INTEGER,
-                {producer.event_time_column} TIMESTAMP,
-                {producer.event_time_column_utc} TIMESTAMP
+                {producer.event_time_column} TIMESTAMP
             )
             """,
         insert_sql=f"""
             INSERT INTO {producer.buffer_table_name}
             VALUES
-                (10, ?, ?),
-                (20, ?, ?),
-                (30, ?, ?)
+                (10, ?),
+                (20, ?),
+                (30, ?)
             """,
         insert_sql_params=[
-            # intentionally insert rows out of time order so the test can verify
-            # that SQL ordering, not insertion order, determines the result
             ny_local_times[8],
-            nyc_local_to_utc_naive(ny_local_times[8]),
             ny_local_times[2],
-            nyc_local_to_utc_naive(ny_local_times[2]),
             ny_local_times[5],
-            nyc_local_to_utc_naive(ny_local_times[5]),
         ],
     )
 
     rows = producer._fetch_eligible_rows(
-        mimic_current_time=datetime(2025, 3, 1, 5, 10, 0, tzinfo=timezone.utc)
+        mimic_current_time=datetime(2025, 3, 1, 0, 10, 0, tzinfo=NY_TZ)
     )
 
     # verify that query results are sorted by event time rather than insertion order
@@ -272,26 +258,23 @@ def test_fetch_eligible_rows_returns_empty_list_when_no_rows_are_eligible(
         create_table_sql=f"""
             CREATE TABLE {producer.buffer_table_name} (
                 vendor_id INTEGER,
-                {producer.event_time_column} TIMESTAMP,
-                {producer.event_time_column_utc} TIMESTAMP
+                {producer.event_time_column} TIMESTAMP
             )
             """,
         insert_sql=f"""
             INSERT INTO {producer.buffer_table_name}
             VALUES
-                (1, ?, ?),
-                (2, ?, ?)
+                (1, ?),
+                (2, ?)
             """,
         insert_sql_params=[
             ny_local_times[8],
-            nyc_local_to_utc_naive(ny_local_times[8]),
             ny_local_times[10],
-            nyc_local_to_utc_naive(ny_local_times[10]),
         ],
     )
 
     rows = producer._fetch_eligible_rows(
-        mimic_current_time=datetime(2025, 3, 1, 5, 5, 0, tzinfo=timezone.utc)
+        mimic_current_time=datetime(2025, 3, 1, 0, 5, 0, tzinfo=NY_TZ)
     )
 
     # verify the query returns no rows when every buffered record is above the upper bound
@@ -318,7 +301,7 @@ def test_fetch_eligible_rows_returns_empty_list_when_buffer_table_does_not_exist
         pass
 
     rows = producer._fetch_eligible_rows(
-        mimic_current_time=datetime(2025, 3, 1, 5, 10, 0, tzinfo=timezone.utc)
+        mimic_current_time=datetime(2025, 3, 1, 0, 10, 0, tzinfo=NY_TZ)
     )
 
     assert rows == []

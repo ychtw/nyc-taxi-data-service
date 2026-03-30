@@ -1,6 +1,7 @@
 import types
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -44,7 +45,8 @@ def resolved_runtime_config(tmp_path: Path) -> dict:
 
 @pytest.fixture
 def mimic_service_start_time() -> datetime:
-    return datetime(2025, 3, 1, 0, 0, 0, tzinfo=timezone.utc)
+    """Provide a deterministic New York-aware mimic service start time."""
+    return datetime(2025, 3, 1, 0, 0, 0, tzinfo=ZoneInfo("America/New_York"))
 
 
 @pytest.fixture

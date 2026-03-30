@@ -1,4 +1,5 @@
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -11,6 +12,8 @@ from tests.helpers.streaming_pipeline_test_helpers import (
     build_minimal_resolved_runtime_config,
     build_runtime_config_with_time_frame,
 )
+
+NY_TZ = ZoneInfo("America/New_York")
 
 
 @pytest.mark.parametrize(
@@ -344,9 +347,9 @@ def test_resolve_stream_timing_config_raises_for_invalid_publish_interval(
 @pytest.mark.parametrize(
     ("end_year_month", "expected"),
     [
-        ("2025-01", datetime(2025, 2, 1, tzinfo=timezone.utc)),
-        ("2025-03", datetime(2025, 4, 1, tzinfo=timezone.utc)),
-        ("2025-11", datetime(2025, 12, 1, tzinfo=timezone.utc)),
+        ("2025-01", datetime(2025, 2, 1, tzinfo=NY_TZ)),
+        ("2025-03", datetime(2025, 4, 1, tzinfo=NY_TZ)),
+        ("2025-11", datetime(2025, 12, 1, tzinfo=NY_TZ)),
     ],
     ids=[
         "january-rollover",
@@ -358,7 +361,7 @@ def test_build_stream_exhaustion_boundary_returns_first_day_of_next_month(
     end_year_month: str,
     expected: datetime,
 ) -> None:
-    """Return the first instant of the following month in UTC."""
+    """Return the first instant of the following month in America/New_York."""
     resolved_runtime_config = build_runtime_config_with_time_frame(
         end_year_month=end_year_month
     )
@@ -376,18 +379,20 @@ def test_build_stream_exhaustion_boundary_rolls_december_into_next_year() -> Non
 
     actual = _build_stream_exhaustion_boundary(resolved_runtime_config)
 
-    assert actual == datetime(2026, 1, 1, tzinfo=timezone.utc)
+    assert actual == datetime(2026, 1, 1, tzinfo=NY_TZ)
 
 
-def test_build_stream_exhaustion_boundary_returns_timezone_aware_utc_datetime() -> None:
-    """Return a timezone-aware datetime in UTC."""
+def test_build_stream_exhaustion_boundary_returns_timezone_aware_new_york_datetime() -> (
+    None
+):
+    """Return a timezone-aware datetime in America/New_York."""
     resolved_runtime_config = build_runtime_config_with_time_frame(
         end_year_month="2025-03"
     )
 
     actual = _build_stream_exhaustion_boundary(resolved_runtime_config)
 
-    assert actual.tzinfo == timezone.utc
+    assert actual.tzinfo == NY_TZ
 
 
 @pytest.mark.parametrize(

@@ -1,9 +1,12 @@
 import json
-from datetime import datetime, timezone
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 import pytest
 
 from tests.helpers.kafka_producer_test_helpers import build_producer
+
+NY_TZ = ZoneInfo("America/New_York")
 
 
 def test_publish_rows_produces_each_row_and_returns_count_and_max_event_time(
@@ -32,17 +35,11 @@ def test_publish_rows_produces_each_row_and_returns_count_and_max_event_time(
     rows = [
         {
             "vendor_id": 1,
-            "tpep_dropoff_datetime": datetime(2025, 3, 1, 5, 5, 0),
-            "tpep_dropoff_datetime_utc": datetime(
-                2025, 3, 1, 0, 5, 0, tzinfo=timezone.utc
-            ),
+            "tpep_dropoff_datetime": datetime(2025, 3, 1, 0, 5, 0),
         },
         {
             "vendor_id": 2,
-            "tpep_dropoff_datetime": datetime(2025, 3, 1, 5, 10, 0),
-            "tpep_dropoff_datetime_utc": datetime(
-                2025, 3, 1, 0, 10, 0, tzinfo=timezone.utc
-            ),
+            "tpep_dropoff_datetime": datetime(2025, 3, 1, 0, 10, 0),
         },
     ]
 
@@ -112,7 +109,7 @@ def test_publish_rows_produces_each_row_and_returns_count_and_max_event_time(
 
     # verify the method reports replay progress based on the input rows
     assert published_count == 2
-    assert max_event_time == datetime(2025, 3, 1, 0, 10, 0, tzinfo=timezone.utc)
+    assert max_event_time == datetime(2025, 3, 1, 0, 10, 0, tzinfo=NY_TZ)
 
 
 def test_publish_rows_polls_after_each_produce_and_flushes_once(
@@ -137,24 +134,15 @@ def test_publish_rows_polls_after_each_produce_and_flushes_once(
     rows = [
         {
             "vendor_id": 10,
-            "lpep_dropoff_datetime": datetime(2025, 3, 1, 5, 2, 0),
-            "lpep_dropoff_datetime_utc": datetime(
-                2025, 3, 1, 0, 2, 0, tzinfo=timezone.utc
-            ),
+            "lpep_dropoff_datetime": datetime(2025, 3, 1, 0, 2, 0),
         },
         {
             "vendor_id": 20,
-            "lpep_dropoff_datetime": datetime(2025, 3, 1, 5, 4, 0),
-            "lpep_dropoff_datetime_utc": datetime(
-                2025, 3, 1, 0, 4, 0, tzinfo=timezone.utc
-            ),
+            "lpep_dropoff_datetime": datetime(2025, 3, 1, 0, 4, 0),
         },
         {
             "vendor_id": 30,
-            "lpep_dropoff_datetime": datetime(2025, 3, 1, 5, 6, 0),
-            "lpep_dropoff_datetime_utc": datetime(
-                2025, 3, 1, 0, 6, 0, tzinfo=timezone.utc
-            ),
+            "lpep_dropoff_datetime": datetime(2025, 3, 1, 0, 6, 0),
         },
     ]
 
@@ -226,13 +214,11 @@ def test_publish_rows_passes_rows_to_key_and_serializer_helpers_in_order(
     rows = [
         {
             "dispatching_base_num": "B1",
-            "dropOff_datetime": datetime(2025, 3, 1, 5, 1, 0),
-            "dropOff_datetime_utc": datetime(2025, 3, 1, 0, 1, 0, tzinfo=timezone.utc),
+            "dropOff_datetime": datetime(2025, 3, 1, 0, 1, 0),
         },
         {
             "dispatching_base_num": "B2",
-            "dropOff_datetime": datetime(2025, 3, 1, 5, 3, 0),
-            "dropOff_datetime_utc": datetime(2025, 3, 1, 0, 3, 0, tzinfo=timezone.utc),
+            "dropOff_datetime": datetime(2025, 3, 1, 0, 3, 0),
         },
     ]
 
@@ -332,7 +318,7 @@ def test_serialize_record_returns_utf8_encoded_json_bytes(
             },
             {
                 "vendor_id": 2,
-                "lpep_dropoff_datetime": datetime(2025, 3, 1, 0, 5, 30).isoformat(),
+                "lpep_dropoff_datetime": "2025-03-01T00:05:30-05:00",
             },
         ),
         (
@@ -344,8 +330,8 @@ def test_serialize_record_returns_utf8_encoded_json_bytes(
             },
             {
                 "trip_id": 100,
-                "pickup_datetime": datetime(2025, 3, 1, 0, 1, 0).isoformat(),
-                "dropoff_datetime": datetime(2025, 3, 1, 0, 8, 0).isoformat(),
+                "pickup_datetime": "2025-03-01T00:01:00-05:00",
+                "dropoff_datetime": "2025-03-01T00:08:00-05:00",
             },
         ),
         (
@@ -431,12 +417,12 @@ def test_build_message_key_returns_none(
     assert producer._build_message_key(row) is None
 
 
-def test_serialize_record_adds_utc_offset_to_naive_utc_datetime_fields(
+def test_serialize_record_adds_new_york_offset_to_naive_datetime_fields(
     monkeypatch: pytest.MonkeyPatch,
     resolved_runtime_config: dict,
     mimic_service_start_time: datetime,
 ) -> None:
-    """Serialize naive *_utc datetime fields with an explicit +00:00 offset."""
+    """Serialize naive datetime fields with an explicit New York offset."""
     producer = build_producer(
         monkeypatch=monkeypatch,
         resolved_runtime_config=resolved_runtime_config,
@@ -446,7 +432,7 @@ def test_serialize_record_adds_utc_offset_to_naive_utc_datetime_fields(
 
     row = {
         "vendor_id": 1,
-        "tpep_dropoff_datetime_utc": datetime(2025, 3, 1, 0, 5, 30),
+        "tpep_dropoff_datetime": datetime(2025, 3, 1, 0, 5, 30),
     }
 
     serialized = producer._serialize_record(row)
@@ -454,5 +440,5 @@ def test_serialize_record_adds_utc_offset_to_naive_utc_datetime_fields(
 
     assert decoded == {
         "vendor_id": 1,
-        "tpep_dropoff_datetime_utc": "2025-03-01T00:05:30+00:00",
+        "tpep_dropoff_datetime": "2025-03-01T00:05:30-05:00",
     }

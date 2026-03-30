@@ -2,6 +2,7 @@ import logging
 import re
 import time
 from datetime import date, datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 from nyc_taxi_data_service.config.config_loader import (
     load_runtime_config,
@@ -116,7 +117,7 @@ def _parse_publish_interval(
 
 def _resolve_stream_timing_config(
     resolved_runtime_config: dict,
-) -> tuple[timedelta, timedelta]:
+) -> tuple[timedelta, timedelta, timedelta]:
     """
     Resolve window size, retention, and publish interval from the runtime config.
 
@@ -238,19 +239,20 @@ def _build_stream_exhaustion_boundary(
 
     The runtime config defines the available source range at month granularity
     via `time_frame.end_year_month` in "YYYY-MM" format. This helper converts
-    that month into the first instant of the following month, which acts as
-    the exclusive upper bound for event times that may appear in the stream.
+    that month into the first instant of the following month in
+    `America/New_York`, which acts as the exclusive upper bound for event
+    times that may appear in the stream.
 
     Example:
         end_year_month = "2025-03"
-        -> boundary = 2025-04-01 00:00:00
+        -> boundary = 2025-04-01 00:00:00-04:00
 
     Args:
         resolved_runtime_config: Fully resolved runtime config dictionary.
 
     Returns:
-        A timezone-aware UTC datetime representing the exclusive upper bound
-        of streamable event time.
+        A timezone-aware `America/New_York` datetime representing the exclusive
+        upper bound of streamable event time.
     """
     end_year_month = resolved_runtime_config["time_frame"]["end_year_month"]
 
@@ -273,10 +275,12 @@ def _build_stream_exhaustion_boundary(
             "Invalid time_frame.end_year_month value. Month must be between 01 and 12."
         )
 
-    if month == 12:
-        return datetime(year + 1, 1, 1, tzinfo=timezone.utc)
+    service_tz = ZoneInfo("America/New_York")
 
-    return datetime(year, month + 1, 1, tzinfo=timezone.utc)
+    if month == 12:
+        return datetime(year + 1, 1, 1, tzinfo=service_tz)
+
+    return datetime(year, month + 1, 1, tzinfo=service_tz)
 
 
 def run_streaming(resolved_runtime_config: dict) -> None:
