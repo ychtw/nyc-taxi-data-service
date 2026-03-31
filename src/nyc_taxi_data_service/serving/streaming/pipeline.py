@@ -323,7 +323,7 @@ def run_streaming(resolved_runtime_config: dict) -> None:
 
     # create one shared `ServiceClock` for the whole streaming service
     # & derive mimic_service_start_time
-    service_clock = ServiceClock(mimic_current_date=mimic_current_date)
+    service_clock = ServiceClock.from_new_session(mimic_current_date=mimic_current_date)
     mimic_service_start_time = service_clock.mimic_service_start_time
     logger.info(
         "Service clock started | real_service_start_time=%s | mimic_service_start_time=%s",

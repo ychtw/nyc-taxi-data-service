@@ -47,7 +47,9 @@ def create_app() -> FastAPI:
     mimic_current_date = date.fromisoformat(
         resolved_runtime_config["serving"]["mimic_current_date"]
     )
-    app.state.service_clock = ServiceClock(mimic_current_date=mimic_current_date)
+    app.state.service_clock = ServiceClock.from_new_session(
+        mimic_current_date=mimic_current_date
+    )
     app.state.api_service = HistoricalApiService(
         resolved_runtime_config=resolved_runtime_config
     )
