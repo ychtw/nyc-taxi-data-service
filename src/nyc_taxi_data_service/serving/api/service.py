@@ -1,3 +1,5 @@
+import base64
+import json
 import logging
 import textwrap
 from datetime import datetime
@@ -38,7 +40,7 @@ class HistoricalApiService:
         """
         self._resolved_runtime_config = resolved_runtime_config
 
-    def get_vehicle_event_time_column(self, vehicle_type: str) -> str:
+    def _get_vehicle_event_time_column(self, vehicle_type: str) -> str:
         """
         Return the configured event-time column for the given vehicle type.
 
@@ -66,7 +68,7 @@ class HistoricalApiService:
                 status_code=400, detail=f"Unsupported vehicle_type: {vehicle_type}"
             ) from e
 
-    def get_parquet_path(self, vehicle_type: str) -> str:
+    def _get_parquet_path(self, vehicle_type: str) -> str:
         """
         Build the Parquet glob path for the requested vehicle type.
 
@@ -83,7 +85,7 @@ class HistoricalApiService:
         )
         return parquet_path
 
-    def normalize_request_datetime(self, dt: datetime, field_name: str) -> datetime:
+    def _normalize_request_datetime(self, dt: datetime, field_name: str) -> datetime:
         """
         Normalize a request datetime into a timezone-aware New York datetime.
 
@@ -113,7 +115,7 @@ class HistoricalApiService:
 
         return normalized
 
-    def to_duckdb_timestamp_value(self, dt: datetime) -> datetime:
+    def _to_duckdb_timestamp_value(self, dt: datetime) -> datetime:
         """
         Convert a service-layer datetime to a naive DuckDB timestamp value.
 
@@ -134,7 +136,7 @@ class HistoricalApiService:
             return dt
         return dt.replace(tzinfo=None)
 
-    def get_available_through(self, mimic_current_time: datetime) -> datetime:
+    def _get_available_through(self, mimic_current_time: datetime) -> datetime:
         """
         Return the latest timestamp currently available through the API.
 
@@ -152,7 +154,7 @@ class HistoricalApiService:
         # use mimic_current_time for now, and later adapt to different service cadence to be more realistic
         return mimic_current_time
 
-    def validate_request_window(
+    def _validate_request_window(
         self,
         start_time: datetime,
         end_time: datetime,
@@ -196,6 +198,17 @@ class HistoricalApiService:
             )
             raise HTTPException(status_code=400, detail="limit must be positive")
 
+        # reject requests with limit > 1000
+        if limit > 1000:
+            logger.warning(
+                "API request rejected | vehicle_type=%s | limit=%s | reason=exceed max limit",
+                vehicle_type,
+                limit,
+            )
+            raise HTTPException(
+                status_code=400, detail="limit must be no more than 1000"
+            )
+
         if end_time > available_through:
             logger.warning(
                 "API request rejected | vehicle_type=%s | end_time=%s | available_through=%s | reason=end_time exceeds available range",
@@ -211,12 +224,214 @@ class HistoricalApiService:
                 ),
             )
 
+    def _encode_cursor(
+        self,
+        event_time: datetime,
+        filename: str,
+        file_row_number: int,
+    ) -> str:
+        """
+        Encode pagination cursor into a URL-safe string.
+
+        The cursor captures the last row of the current page using the same
+        ordering fields as the query:
+            (event_time, filename, file_row_number)
+
+        Args:
+            event_time: Event-time value of the last row in the page.
+            filename: Source file name of the last row.
+            file_row_number: Row number within the source file.
+
+        Returns:
+            A URL-safe base64-encoded cursor string.
+        """
+        # IMPORTANT:
+        # - event_time must match DuckDB comparison semantics (naive NY time)
+        # - we store it as ISO string for portability
+        payload = {
+            "event_time": event_time.isoformat(),
+            "filename": filename,
+            "file_row_number": file_row_number,
+        }
+
+        # compact JSON (no whitespace)
+        raw_bytes = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+
+        # URL-safe base64 encoding
+        encoded = base64.urlsafe_b64encode(raw_bytes).decode("utf-8")
+
+        return encoded
+
+    def _decode_cursor(self, cursor: str) -> dict[str, datetime | str | int]:
+        """
+        Decode pagination cursor string into its components.
+
+        Args:
+            cursor: Base64-encoded cursor string from client request.
+
+        Returns:
+            A dictionary containing:
+                - event_time (datetime)
+                - filename (str)
+                - file_row_number (int)
+
+        Raises:
+            HTTPException: If cursor is malformed or invalid.
+        """
+        try:
+            # base64 decode
+            raw_bytes = base64.urlsafe_b64decode(cursor.encode("utf-8"))
+
+            # parse JSON
+            payload = json.loads(raw_bytes.decode("utf-8"))
+
+            # validate required fields
+            if not all(
+                k in payload for k in ("event_time", "filename", "file_row_number")
+            ):
+                raise ValueError("Missing required cursor fields")
+
+            # reconstruct types
+            event_time = datetime.fromisoformat(payload["event_time"])
+            filename = payload["filename"]
+            file_row_number = int(payload["file_row_number"])
+
+            return {
+                "event_time": event_time,
+                "filename": filename,
+                "file_row_number": file_row_number,
+            }
+
+        except Exception as e:
+            logger.warning(
+                "API request rejected | reason=invalid cursor | cursor=%s",
+                cursor,
+            )
+            raise HTTPException(status_code=400, detail="Invalid cursor") from e
+
+    def _build_paginated_query(
+        self,
+        vehicle_type: str,
+        event_time_column: str,
+        parquet_path: str,
+        query_start_time: datetime,
+        query_end_time: datetime,
+        limit: int,
+        cursor: str | None,
+    ) -> tuple[str, list]:
+        """
+        Build the DuckDB query and parameters for a paginated trip fetch.
+
+        This helper constructs one of two query shapes:
+            - first-page query when `cursor` is None
+            - continuation query when `cursor` is provided
+
+        Both query shapes use the same stable ordering:
+            ORDER BY event_time, filename, file_row_number
+
+        The continuation query resumes strictly after the row identified by the
+        cursor, using the same ordering fields as the sort key.
+
+        Args:
+            vehicle_type: Requested vehicle type, used for logging.
+            event_time_column: Vehicle-specific event-time column name.
+            parquet_path: Glob path to the partitioned Parquet files.
+            query_start_time: Inclusive lower bound for the event-time filter,
+                already converted into DuckDB-compatible naive New York time.
+            query_end_time: Exclusive upper bound for the event-time filter,
+                already converted into DuckDB-compatible naive New York time.
+            limit: Maximum number of rows requested by the client.
+            cursor: Opaque pagination cursor from the previous page, or None for
+                the first page.
+
+        Returns:
+            A tuple of:
+                - query: SQL query string
+                - query_params: positional parameters for the SQL query
+        """
+        # fetch one extra row beyond the requested page size so the caller can
+        # determine whether another page exists without issuing a separate count query
+        page_fetch_limit = limit + 1
+
+        if cursor is None:
+            # first-page query: apply only the base request window filter
+            query = textwrap.dedent(
+                f"""
+                SELECT
+                    *,
+                    filename,
+                    file_row_number
+                FROM read_parquet(?, filename=True, file_row_number=True)
+                WHERE {event_time_column} >= ?
+                    AND {event_time_column} < ?
+                ORDER BY {event_time_column} ASC, filename ASC, file_row_number ASC
+                LIMIT ?
+                """
+            )
+            query_params = [
+                parquet_path,
+                query_start_time,
+                query_end_time,
+                page_fetch_limit,
+            ]
+            return query, query_params
+
+        # continuation query: resume strictly after the row identified by the cursor
+        decoded_cursor = self._decode_cursor(cursor)
+        cursor_event_time = decoded_cursor["event_time"]
+        cursor_filename = decoded_cursor["filename"]
+        cursor_file_row_number = decoded_cursor["file_row_number"]
+
+        logger.debug(
+            "Decoded pagination cursor | vehicle_type=%s | event_time=%s | filename=%s | file_row_number=%d",
+            vehicle_type,
+            format_log_dt(cursor_event_time),
+            cursor_filename,
+            cursor_file_row_number,
+        )
+
+        query = textwrap.dedent(
+            f"""
+            SELECT
+                *,
+                filename,
+                file_row_number
+            FROM read_parquet(?, filename=True, file_row_number=True)
+            WHERE {event_time_column} >= ?
+                AND {event_time_column} < ?
+                AND ( {event_time_column} > ?
+                    OR ( {event_time_column} = ?
+                        AND ( filename > ?
+                            OR ( filename = ?
+                                AND file_row_number > ?
+                            )
+                        )
+                    )
+                )
+            ORDER BY {event_time_column} ASC, filename ASC, file_row_number ASC
+            LIMIT ?
+            """
+        )
+        query_params = [
+            parquet_path,
+            query_start_time,
+            query_end_time,
+            cursor_event_time,
+            cursor_event_time,
+            cursor_filename,
+            cursor_filename,
+            cursor_file_row_number,
+            page_fetch_limit,
+        ]
+        return query, query_params
+
     def get_trips(
         self,
         vehicle_type: str,
         start_time: datetime,
         end_time: datetime,
         limit: int,
+        cursor: str | None,
         mimic_current_time: datetime,
         con: duckdb.DuckDBPyConnection,
     ) -> dict:
@@ -235,6 +450,8 @@ class HistoricalApiService:
             start_time: Inclusive lower bound for the event-time filter.
             end_time: Exclusive upper bound for the event-time filter.
             limit: Maximum number of rows to return.
+            cursor: Opaque pagination cursor from the previous page, or None for
+                the first page.
             mimic_current_time: Current mimic service time used to derive the
                 API availability boundary.
             con: DuckDB connection used to execute the query.
@@ -243,13 +460,13 @@ class HistoricalApiService:
             A JSON-serializable dictionary containing request metadata and the
             matching trip rows.
         """
+        # normalize request datetimes into service-layer timezone semantics
+        start_time = self._normalize_request_datetime(start_time, "start_time")
+        end_time = self._normalize_request_datetime(end_time, "end_time")
+        available_through = self._get_available_through(mimic_current_time)
 
-        # validate request inputs
-        start_time = self.normalize_request_datetime(start_time, "start_time")
-        end_time = self.normalize_request_datetime(end_time, "end_time")
-        available_through = self.get_available_through(mimic_current_time)
-
-        self.validate_request_window(
+        # validate the requested window and page size before building the query
+        self._validate_request_window(
             start_time=start_time,
             end_time=end_time,
             available_through=available_through,
@@ -257,15 +474,16 @@ class HistoricalApiService:
             vehicle_type=vehicle_type,
         )
 
-        # gather required info for the query
-        event_time_column = self.get_vehicle_event_time_column(
+        # resolve vehicle-specific query inputs from configuration
+        event_time_column = self._get_vehicle_event_time_column(
             vehicle_type=vehicle_type
         )
-        parquet_path = self.get_parquet_path(vehicle_type=vehicle_type)
+        parquet_path = self._get_parquet_path(vehicle_type=vehicle_type)
 
-        # construct query
-        query_start_time = self.to_duckdb_timestamp_value(start_time)
-        query_end_time = self.to_duckdb_timestamp_value(end_time)
+        # convert validated service-layer datetimes into naive New York-local
+        # timestamps so they match the raw TLC parquet timestamp columns in DuckDB
+        query_start_time = self._to_duckdb_timestamp_value(start_time)
+        query_end_time = self._to_duckdb_timestamp_value(end_time)
 
         logger.debug(
             "Resolved API query inputs | vehicle_type=%s | event_time_column=%s | parquet_path=%s | available_through=%s",
@@ -280,21 +498,38 @@ class HistoricalApiService:
             format_log_dt(query_end_time),
         )
 
-        query = textwrap.dedent(
-            f"""
-            SELECT *
-            FROM read_parquet(?)
-            WHERE {event_time_column} >= ?
-                AND {event_time_column} < ?
-            ORDER BY {event_time_column} ASC
-            LIMIT ?
-            """
+        # build the first-page or continuation query depending on whether a cursor
+        # was provided by the client
+        query, query_params = self._build_paginated_query(
+            vehicle_type=vehicle_type,
+            event_time_column=event_time_column,
+            parquet_path=parquet_path,
+            query_start_time=query_start_time,
+            query_end_time=query_end_time,
+            limit=limit,
+            cursor=cursor,
         )
-        query_params = [parquet_path, query_start_time, query_end_time, limit]
 
-        # convert the query result into plain Python dictionaries so FastAPI can
-        # serialize the response body as JSON
-        rows = con.execute(query, query_params).pl().to_dicts()
+        # execute the query and inspect one extra look-ahead row to determine
+        # whether a subsequent page exists
+        result_df = con.execute(query, query_params).pl()
+        has_more = result_df.height > limit
+        page_df = result_df.head(limit)
+
+        # build the next cursor from the last row of the returned page
+        next_cursor = None
+        if has_more and page_df.height > 0:
+            # `named=True` returns a dictionary keyed by column name
+            last_row = page_df.row(-1, named=True)
+            next_cursor = self._encode_cursor(
+                event_time=last_row[event_time_column],
+                filename=last_row["filename"],
+                file_row_number=last_row["file_row_number"],
+            )
+
+        # remove DuckDB-only metadata columns before serializing rows into the API
+        # response body
+        page_rows = page_df.drop(["filename", "file_row_number"]).to_dicts()
 
         logger.info(
             "API query succeeded | vehicle_type=%s | start_time=%s | end_time=%s | limit=%d | row_count=%d",
@@ -302,7 +537,7 @@ class HistoricalApiService:
             format_log_dt(start_time),
             format_log_dt(end_time),
             limit,
-            len(rows),
+            len(page_rows),
         )
 
         return {
@@ -310,6 +545,10 @@ class HistoricalApiService:
             "start_time": start_time,
             "end_time": end_time,
             "limit": limit,
+            "returned_count": len(page_rows),
+            "has_more": has_more,
+            "next_cursor": next_cursor,
+            "available_through": available_through,
             "mimic_current_time": mimic_current_time,
-            "rows": rows,
+            "rows": page_rows,
         }

@@ -67,6 +67,7 @@ def create_app() -> FastAPI:
         start_time: datetime,
         end_time: datetime,
         limit: int = 100,
+        cursor: str | None = None,
         con: duckdb.DuckDBPyConnection = Depends(get_duckdb_connection),
     ) -> dict:
         """
@@ -94,11 +95,13 @@ def create_app() -> FastAPI:
         mimic_current_time: datetime = request.app.state.service_clock.now()
 
         logger.debug(
-            "Received API trip request | vehicle_type=%s | start_time=%s | end_time=%s | limit=%d | mimic_current_time=%s",
+            "Received API trip request | vehicle_type=%s | start_time=%s | end_time=%s | "
+            "limit=%d | cursor_present=%s | mimic_current_time=%s",
             vehicle_type,
             format_log_dt(start_time),
             format_log_dt(end_time),
             limit,
+            cursor is not None,
             format_log_dt(mimic_current_time),
         )
 
@@ -107,6 +110,7 @@ def create_app() -> FastAPI:
             start_time=start_time,
             end_time=end_time,
             limit=limit,
+            cursor=cursor,
             mimic_current_time=mimic_current_time,
             con=con,
         )
