@@ -70,6 +70,11 @@ defaults:
           # - smaller values make the stream feel more real-time
           publish_interval: "5s"
 
+    api:
+      rate_limit:
+        enabled: true
+        max_concurrent_requests: 4
+
 environments:
   dev:
     logging:

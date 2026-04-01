@@ -5,6 +5,10 @@ from datetime import date, datetime
 import duckdb
 from fastapi import Depends, FastAPI, Request
 
+from nyc_taxi_data_service.serving.api.rate_limit import (
+    GlobalConcurrencyLimiter,
+    register_rate_limit_middleware,
+)
 from nyc_taxi_data_service.serving.api.service import HistoricalApiService
 from nyc_taxi_data_service.serving.common.log_time import format_log_dt
 from nyc_taxi_data_service.serving.common.service_clock_loader import (
@@ -44,6 +48,15 @@ def create_app() -> FastAPI:
     # - with SERVICE_STARTUP_CONTEXT_PATH env variable -> use shared startup context JSON
     # - otherwise -> resolve runtime.yaml (standalone mode)
     resolved_runtime_config = load_serving_runtime_config()
+
+    # create a global concurrency limiter
+    rate_limit_config = resolved_runtime_config["serving"]["api"]["rate_limit"]
+    if rate_limit_config["enabled"]:
+        limiter = GlobalConcurrencyLimiter(
+            max_concurrent_requests=rate_limit_config["max_concurrent_requests"]
+        )
+        app.state.api_concurrency_limiter = limiter
+        register_rate_limit_middleware(app=app, limiter=limiter)
 
     # build long-lived API service components once and store them on app state
     mimic_current_date = date.fromisoformat(

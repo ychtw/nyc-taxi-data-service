@@ -412,6 +412,14 @@ def test_create_app_builds_service_clock_with_helper(mocker) -> None:
                 "fhv": "dropOff_datetime",
                 "fhvhv": "dropoff_datetime",
             },
+            "api": {
+                "rate_limit": {
+                    "enabled": True,
+                    "max_concurrent_requests": 4,
+                    "requests_per_second": 10,
+                    "burst_capacity": 20,
+                }
+            },
         },
         "storage": {"target_base_path": "data/raw"},
     }
@@ -451,6 +459,14 @@ def test_create_app_stores_historical_api_service_with_resolved_config(mocker) -
                 "green": "lpep_dropoff_datetime",
                 "fhv": "dropOff_datetime",
                 "fhvhv": "dropoff_datetime",
+            },
+            "api": {
+                "rate_limit": {
+                    "enabled": True,
+                    "max_concurrent_requests": 4,
+                    "requests_per_second": 10,
+                    "burst_capacity": 20,
+                }
             },
         },
         "storage": {"target_base_path": "data/raw"},
@@ -644,3 +660,47 @@ def test_pagination_respects_limit_on_all_pages(client: TestClient):
             break
 
         cursor = payload["next_cursor"]
+
+
+def test_create_app_skips_concurrency_limiter_when_rate_limit_disabled(mocker) -> None:
+    """
+    create_app() should not attach a concurrency limiter when rate limiting is disabled.
+    """
+    resolved_runtime_config = {
+        "serving": {
+            "mimic_current_date": "2025-01-15",
+            "service_event_time_column_by_vehicle_type": {
+                "yellow": "tpep_dropoff_datetime",
+                "green": "lpep_dropoff_datetime",
+                "fhv": "dropOff_datetime",
+                "fhvhv": "dropoff_datetime",
+            },
+            "api": {
+                "rate_limit": {
+                    "enabled": False,
+                    "max_concurrent_requests": 4,
+                    "requests_per_second": 10,
+                    "burst_capacity": 20,
+                }
+            },
+        },
+        "storage": {"target_base_path": "data/raw"},
+    }
+
+    mocker.patch(
+        "nyc_taxi_data_service.serving.api.app.load_serving_runtime_config",
+        return_value=resolved_runtime_config,
+    )
+
+    mock_service_clock = Mock()
+    mock_service_clock.mimic_service_start_time = datetime(
+        2025, 1, 15, 9, 30, 0, tzinfo=NY_TZ
+    )
+    mocker.patch(
+        "nyc_taxi_data_service.serving.api.app._build_service_clock",
+        return_value=mock_service_clock,
+    )
+
+    created_app = api_app_module.create_app()
+
+    assert not hasattr(created_app.state, "api_concurrency_limiter")
