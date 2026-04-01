@@ -97,9 +97,11 @@ def client(resolved_runtime_config: dict):
         yield test_client
 
 
-def test_get_trips_returns_rows_for_valid_request(client: TestClient) -> None:
+def test_get_trips_returns_rows_and_pagination_metadata_for_valid_request(
+    client: TestClient,
+) -> None:
     """
-    Return matching rows for a valid request and preserve response metadata.
+    Return matching rows and expected pagination metadata for a valid first-page request.
     """
     response = client.get(
         "/trips/yellow",
@@ -117,6 +119,10 @@ def test_get_trips_returns_rows_for_valid_request(client: TestClient) -> None:
     assert payload["start_time"] == "2025-01-15T09:00:00-05:00"
     assert payload["end_time"] == "2025-01-15T09:01:00-05:00"
     assert payload["limit"] == 10
+    assert payload["returned_count"] == 2
+    assert payload["has_more"] is False
+    assert payload["next_cursor"] is None
+    assert payload["available_through"] == "2025-01-15T09:30:00-05:00"
     assert payload["mimic_current_time"] == "2025-01-15T09:30:00-05:00"
     assert len(payload["rows"]) == 2
 
@@ -125,6 +131,10 @@ def test_get_trips_returns_rows_for_valid_request(client: TestClient) -> None:
         "2025-01-15T09:00:00",
         "2025-01-15T09:00:30",
     ]
+
+    # DuckDB-only pagination metadata columns should not be exposed in response rows.
+    assert "filename" not in payload["rows"][0]
+    assert "file_row_number" not in payload["rows"][0]
 
 
 def test_get_trips_returns_400_for_unsupported_vehicle_type(
@@ -190,6 +200,27 @@ def test_get_trips_returns_400_when_limit_is_not_positive(
     }
 
 
+def test_get_trips_returns_400_when_limit_exceeds_maximum(
+    client: TestClient,
+) -> None:
+    """
+    Reject requests whose limit exceeds the maximum allowed page size.
+    """
+    response = client.get(
+        "/trips/yellow",
+        params={
+            "start_time": "2025-01-15T09:00:00",
+            "end_time": "2025-01-15T09:01:00",
+            "limit": 1001,
+        },
+    )
+
+    assert response.status_code == 400
+    assert response.json() == {
+        "detail": "limit must be no more than 1000",
+    }
+
+
 def test_get_trips_returns_400_when_end_time_exceeds_available_range(
     client: TestClient,
 ) -> None:
@@ -250,7 +281,100 @@ def test_get_trips_returns_empty_rows_when_no_records_match(
 
     payload = response.json()
     assert payload["vehicle_type"] == "yellow"
+    assert payload["returned_count"] == 0
+    assert payload["has_more"] is False
+    assert payload["next_cursor"] is None
     assert payload["rows"] == []
+
+
+def test_get_trips_returns_next_cursor_when_more_rows_exist(
+    client: TestClient,
+) -> None:
+    """
+    Return a next cursor and set has_more when additional rows remain after the current page.
+    """
+    response = client.get(
+        "/trips/yellow",
+        params={
+            "start_time": "2025-01-15T09:00:00",
+            "end_time": "2025-01-15T09:02:00",
+            "limit": 2,
+        },
+    )
+
+    assert response.status_code == 200
+
+    payload = response.json()
+    assert payload["returned_count"] == 2
+    assert payload["has_more"] is True
+    assert payload["next_cursor"] is not None
+    assert len(payload["rows"]) == 2
+    assert [row["tpep_dropoff_datetime"] for row in payload["rows"]] == [
+        "2025-01-15T09:00:00",
+        "2025-01-15T09:00:30",
+    ]
+
+
+def test_get_trips_accepts_cursor_and_returns_continuation_page(
+    client: TestClient,
+) -> None:
+    """
+    Return the next page of rows when the client supplies a valid cursor.
+    """
+    first_response = client.get(
+        "/trips/yellow",
+        params={
+            "start_time": "2025-01-15T09:00:00",
+            "end_time": "2025-01-15T09:02:00",
+            "limit": 2,
+        },
+    )
+    assert first_response.status_code == 200
+
+    first_payload = first_response.json()
+    assert first_payload["has_more"] is True
+    assert first_payload["next_cursor"] is not None
+
+    second_response = client.get(
+        "/trips/yellow",
+        params={
+            "start_time": "2025-01-15T09:00:00",
+            "end_time": "2025-01-15T09:02:00",
+            "limit": 2,
+            "cursor": first_payload["next_cursor"],
+        },
+    )
+    assert second_response.status_code == 200
+
+    second_payload = second_response.json()
+    assert second_payload["returned_count"] == 1
+    assert second_payload["has_more"] is False
+    assert second_payload["next_cursor"] is None
+    assert [row["tpep_dropoff_datetime"] for row in second_payload["rows"]] == [
+        "2025-01-15T09:01:00",
+    ]
+
+
+def test_get_trips_returns_400_for_invalid_cursor(
+    client: TestClient,
+) -> None:
+    """
+    Reject continuation requests whose cursor is malformed.
+    """
+    response = client.get(
+        "/trips/yellow",
+        params={
+            "start_time": "2025-01-15T09:00:00",
+            "end_time": "2025-01-15T09:02:00",
+            "limit": 2,
+            "cursor": "not-a-valid-cursor",
+        },
+    )
+
+    assert response.status_code == 400
+    assert response.json() == {
+        "detail": "Invalid cursor",
+    }
 
 
 def test_get_trips_respects_limit(client: TestClient) -> None:
@@ -269,8 +393,8 @@ def test_get_trips_respects_limit(client: TestClient) -> None:
     assert response.status_code == 200
 
     payload = response.json()
-
     assert payload["limit"] == 1
+    assert payload["returned_count"] == 1
     assert len(payload["rows"]) == 1
     assert payload["rows"][0]["tpep_dropoff_datetime"] == "2025-01-15T09:00:00"
 
@@ -287,6 +411,14 @@ def test_create_app_builds_service_clock_with_helper(mocker) -> None:
                 "green": "lpep_dropoff_datetime",
                 "fhv": "dropOff_datetime",
                 "fhvhv": "dropoff_datetime",
+            },
+            "api": {
+                "rate_limit": {
+                    "enabled": True,
+                    "max_concurrent_requests": 4,
+                    "requests_per_second": 10,
+                    "burst_capacity": 20,
+                }
             },
         },
         "storage": {"target_base_path": "data/raw"},
@@ -328,6 +460,14 @@ def test_create_app_stores_historical_api_service_with_resolved_config(mocker) -
                 "fhv": "dropOff_datetime",
                 "fhvhv": "dropoff_datetime",
             },
+            "api": {
+                "rate_limit": {
+                    "enabled": True,
+                    "max_concurrent_requests": 4,
+                    "requests_per_second": 10,
+                    "burst_capacity": 20,
+                }
+            },
         },
         "storage": {"target_base_path": "data/raw"},
     }
@@ -354,3 +494,213 @@ def test_create_app_stores_historical_api_service_with_resolved_config(mocker) -
         created_app.state.api_service._resolved_runtime_config
         == resolved_runtime_config
     )
+
+
+def test_get_trips_full_pagination_traversal(client: TestClient) -> None:
+    """
+    Iterate through all pages using next_cursor and verify:
+    - no duplicates
+    - no missing rows
+    - correct ordering across pages
+    """
+
+    all_rows = []
+    cursor = None
+
+    while True:
+        response = client.get(
+            "/trips/yellow",
+            params={
+                "start_time": "2025-01-15T09:00:00",
+                "end_time": "2025-01-15T09:02:00",
+                "limit": 2,
+                **({"cursor": cursor} if cursor else {}),
+            },
+        )
+
+        assert response.status_code == 200
+        payload = response.json()
+
+        all_rows.extend(payload["rows"])
+
+        if not payload["has_more"]:
+            break
+
+        cursor = payload["next_cursor"]
+        assert cursor is not None  # safety check
+
+    # final validation
+    assert len(all_rows) == 3
+
+    # ensure correct ordering
+    returned_times = [row["tpep_dropoff_datetime"] for row in all_rows]
+    assert returned_times == [
+        "2025-01-15T09:00:00",
+        "2025-01-15T09:00:30",
+        "2025-01-15T09:01:00",
+    ]
+
+
+def test_pagination_has_no_duplicates(client: TestClient):
+    """
+    Verify that cursor-based pagination does not return duplicate records
+    across pages.
+
+    This test iterates through all pages using successive `next_cursor` values
+    and tracks a composite key for each row. It asserts that no row appears
+    more than once across the full traversal.
+
+    This ensures that the continuation query correctly resumes *after* the
+    last row of the previous page, rather than overlapping with it.
+    """
+    seen = set()
+    cursor = None
+
+    while True:
+        response = client.get(
+            "/trips/yellow",
+            params={
+                "start_time": "2025-01-15T09:00:00",
+                "end_time": "2025-01-15T09:02:00",
+                "limit": 2,
+                **({"cursor": cursor} if cursor else {}),
+            },
+        )
+
+        payload = response.json()
+
+        for row in payload["rows"]:
+            key = (
+                row["tpep_dropoff_datetime"],
+                row["fare_amount"],
+            )
+            assert key not in seen
+            seen.add(key)
+
+        if not payload["has_more"]:
+            break
+
+        cursor = payload["next_cursor"]
+
+
+def test_cursor_is_deterministic(client: TestClient):
+    """
+    Verify that a given cursor produces deterministic results.
+
+    This test issues multiple requests using the same cursor and asserts that
+    the returned rows are identical across calls.
+
+    This ensures that cursor decoding and continuation query logic are stable
+    and do not depend on non-deterministic factors such as execution order or
+    implicit state.
+    """
+    first = client.get(
+        "/trips/yellow",
+        params={
+            "start_time": "2025-01-15T09:00:00",
+            "end_time": "2025-01-15T09:02:00",
+            "limit": 2,
+        },
+    ).json()
+
+    cursor = first["next_cursor"]
+
+    second_a = client.get(
+        "/trips/yellow",
+        params={
+            "start_time": "2025-01-15T09:00:00",
+            "end_time": "2025-01-15T09:02:00",
+            "limit": 2,
+            "cursor": cursor,
+        },
+    ).json()
+
+    second_b = client.get(
+        "/trips/yellow",
+        params={
+            "start_time": "2025-01-15T09:00:00",
+            "end_time": "2025-01-15T09:02:00",
+            "limit": 2,
+            "cursor": cursor,
+        },
+    ).json()
+
+    assert second_a["rows"] == second_b["rows"]
+
+
+def test_pagination_respects_limit_on_all_pages(client: TestClient):
+    """
+    Verify that each page respects the requested limit across the full
+    pagination sequence.
+
+    This test iterates through all pages and asserts that the number of rows
+    returned in each response does not exceed the specified limit.
+
+    This ensures that the service consistently enforces page size constraints,
+    including for continuation queries.
+    """
+    cursor = None
+
+    while True:
+        response = client.get(
+            "/trips/yellow",
+            params={
+                "start_time": "2025-01-15T09:00:00",
+                "end_time": "2025-01-15T09:02:00",
+                "limit": 2,
+                **({"cursor": cursor} if cursor else {}),
+            },
+        )
+
+        payload = response.json()
+
+        assert len(payload["rows"]) <= 2
+
+        if not payload["has_more"]:
+            break
+
+        cursor = payload["next_cursor"]
+
+
+def test_create_app_skips_concurrency_limiter_when_rate_limit_disabled(mocker) -> None:
+    """
+    create_app() should not attach a concurrency limiter when rate limiting is disabled.
+    """
+    resolved_runtime_config = {
+        "serving": {
+            "mimic_current_date": "2025-01-15",
+            "service_event_time_column_by_vehicle_type": {
+                "yellow": "tpep_dropoff_datetime",
+                "green": "lpep_dropoff_datetime",
+                "fhv": "dropOff_datetime",
+                "fhvhv": "dropoff_datetime",
+            },
+            "api": {
+                "rate_limit": {
+                    "enabled": False,
+                    "max_concurrent_requests": 4,
+                    "requests_per_second": 10,
+                    "burst_capacity": 20,
+                }
+            },
+        },
+        "storage": {"target_base_path": "data/raw"},
+    }
+
+    mocker.patch(
+        "nyc_taxi_data_service.serving.api.app.load_serving_runtime_config",
+        return_value=resolved_runtime_config,
+    )
+
+    mock_service_clock = Mock()
+    mock_service_clock.mimic_service_start_time = datetime(
+        2025, 1, 15, 9, 30, 0, tzinfo=NY_TZ
+    )
+    mocker.patch(
+        "nyc_taxi_data_service.serving.api.app._build_service_clock",
+        return_value=mock_service_clock,
+    )
+
+    created_app = api_app_module.create_app()
+
+    assert not hasattr(created_app.state, "api_concurrency_limiter")
