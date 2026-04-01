@@ -5,6 +5,7 @@ import pytest
 import yaml
 
 from nyc_taxi_data_service.config.config_loader import (
+    _substitute_env_vars,
     load_runtime_config,
     load_sources_config,
     resolve_runtime_config,
@@ -99,8 +100,126 @@ def test_load_sources_config_raises_yaml_error_for_invalid_yaml(tmp_path: Path) 
         load_sources_config(bad_file)
 
 
-def test_load_runtime_config_default() -> None:
+@pytest.mark.parametrize(
+    ("value", "env_name", "env_value", "expected"),
+    [
+        (
+            "${KAFKA_BOOTSTRAP_SERVERS}",
+            "KAFKA_BOOTSTRAP_SERVERS",
+            "broker:29092",
+            "broker:29092",
+        ),
+        (
+            "prefix-${KAFKA_BOOTSTRAP_SERVERS}-suffix",
+            "KAFKA_BOOTSTRAP_SERVERS",
+            "broker:29092",
+            "prefix-broker:29092-suffix",
+        ),
+        (
+            "${KAFKA_BOOTSTRAP_SERVERS:-localhost:9092}",
+            "KAFKA_BOOTSTRAP_SERVERS",
+            "broker:29092",
+            "broker:29092",
+        ),
+    ],
+    ids=[
+        "plain-placeholder",
+        "embedded-placeholder",
+        "env-overrides-default",
+    ],
+)
+def test_substitute_env_vars_uses_environment_value(
+    mocker,
+    value: str,
+    env_name: str,
+    env_value: str,
+    expected: str,
+) -> None:
+    """Substitute env placeholders with the environment value when set."""
+    mocker.patch("os.getenv", return_value=env_value)
+
+    assert _substitute_env_vars(value) == expected
+
+
+def test_substitute_env_vars_uses_default_when_env_var_missing(mocker) -> None:
+    """Use the placeholder default when the environment variable is missing."""
+    mocker.patch("os.getenv", return_value=None)
+
+    actual = _substitute_env_vars("${KAFKA_BOOTSTRAP_SERVERS:-localhost:9092}")
+
+    assert actual == "localhost:9092"
+
+
+def test_substitute_env_vars_raises_when_required_env_var_missing(mocker) -> None:
+    """Raise ValueError when a required env placeholder has no env value or default."""
+    mocker.patch("os.getenv", return_value=None)
+
+    with pytest.raises(
+        ValueError,
+        match="Missing required environment variable in config substitution: KAFKA_BOOTSTRAP_SERVERS",
+    ):
+        _substitute_env_vars("${KAFKA_BOOTSTRAP_SERVERS}")
+
+
+def test_substitute_env_vars_recurses_through_nested_dicts_and_lists(mocker) -> None:
+    """Recursively substitute placeholders inside nested dict and list values."""
+    mocker.patch(
+        "os.getenv",
+        side_effect=lambda name: {
+            "KAFKA_BOOTSTRAP_SERVERS": "broker:29092",
+            "CLIENT_ID": "nyc-taxi-data-service",
+        }.get(name),
+    )
+
+    raw_value = {
+        "serving": {
+            "streaming": {
+                "kafka": {
+                    "client": {
+                        "bootstrap_servers": "${KAFKA_BOOTSTRAP_SERVERS}",
+                        "client_id": "${CLIENT_ID}",
+                    },
+                    "brokers": [
+                        "${KAFKA_BOOTSTRAP_SERVERS}",
+                        "${MISSING_BROKER:-localhost:9092}",
+                    ],
+                }
+            }
+        }
+    }
+
+    actual = _substitute_env_vars(raw_value)
+
+    assert actual == {
+        "serving": {
+            "streaming": {
+                "kafka": {
+                    "client": {
+                        "bootstrap_servers": "broker:29092",
+                        "client_id": "nyc-taxi-data-service",
+                    },
+                    "brokers": [
+                        "broker:29092",
+                        "localhost:9092",
+                    ],
+                }
+            }
+        }
+    }
+
+
+def test_substitute_env_vars_leaves_non_string_scalars_unchanged() -> None:
+    """Return non-string scalar values unchanged."""
+    assert _substitute_env_vars(123) == 123
+    assert _substitute_env_vars(1.5) == 1.5
+    assert _substitute_env_vars(True) is True
+    assert _substitute_env_vars(None) is None
+
+
+def test_load_runtime_config_default(mocker) -> None:
     """Load the default packaged runtime config."""
+    mocker.patch("os.getenv", return_value=None)
+
     config = load_runtime_config()
 
     allowed_log_levels = {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}
@@ -135,6 +254,10 @@ def test_load_runtime_config_default() -> None:
     assert isinstance(buffer_config["db_table_name"], str)
 
     # assert there's corresponding section in `environments` for the active environment
+    kafka_client_config = serving_defaults["streaming"]["kafka"]["client"]
+    assert kafka_client_config["bootstrap_servers"] == "localhost:9092"
+    assert kafka_client_config["client_id"] == "nyc-taxi-data-service"
+
     active_env = config["active_environment"]
     assert active_env in config["environments"]
 
@@ -162,8 +285,8 @@ def test_load_runtime_config_default() -> None:
         assert isinstance(serving_config["mimic_current_date"], str)
 
 
-def test_load_runtime_config_custom_path(tmp_path: Path) -> None:
-    """Load runtime config from a custom YAML file path."""
+def test_load_runtime_config_custom_path(tmp_path: Path, mocker) -> None:
+    """Load runtime config from a custom YAML file path and substitute env vars."""
     # create a mock yaml in the temporary directory
     config_file = tmp_path / "test_runtime.yaml"
     mock_data = {
@@ -180,6 +303,12 @@ def test_load_runtime_config_custom_path(tmp_path: Path) -> None:
                         "window_size": "45m",
                         "db_base_path": "tmp/stream_buffer",
                         "db_table_name": "buffered_data",
+                    },
+                    "kafka": {
+                        "client": {
+                            "bootstrap_servers": "${KAFKA_BOOTSTRAP_SERVERS:-localhost:9092}",
+                            "client_id": "nyc-taxi-data-service",
+                        }
                     },
                 },
             },
@@ -205,6 +334,8 @@ def test_load_runtime_config_custom_path(tmp_path: Path) -> None:
     with config_file.open("w", encoding="utf-8") as f:
         yaml.dump(mock_data, f)
 
+    mocker.patch("os.getenv", return_value="broker:29092")
+
     # call the function with the custom testing path
     config = load_runtime_config(config_file)
 
@@ -221,6 +352,12 @@ def test_load_runtime_config_custom_path(tmp_path: Path) -> None:
         config["defaults"]["serving"]["streaming"]["buffer"]["db_table_name"]
         == "buffered_data"
     )
+    assert (
+        config["defaults"]["serving"]["streaming"]["kafka"]["client"][
+            "bootstrap_servers"
+        ]
+        == "broker:29092"
+    )
 
     test_env = config["environments"]["test"]
     assert test_env["logging"]["level"] == "DEBUG"
@@ -230,6 +367,92 @@ def test_load_runtime_config_custom_path(tmp_path: Path) -> None:
     assert test_env["time_frame"]["end_year_month"] == "2026-02"
     assert test_env["vehicle_types"] == ["yellow"]
     assert test_env["serving"]["mimic_current_date"] == "2026-01-15"
+
+
+def test_load_runtime_config_uses_default_when_env_var_missing(
+    tmp_path: Path, mocker
+) -> None:
+    """Use the placeholder default when the env var is missing in runtime YAML."""
+    config_file = tmp_path / "test_runtime.yaml"
+    config_file.write_text(
+        textwrap.dedent(
+            """
+            active_environment: test
+            defaults:
+              serving:
+                streaming:
+                  kafka:
+                    client:
+                      bootstrap_servers: "${KAFKA_BOOTSTRAP_SERVERS:-localhost:9092}"
+            environments:
+              test:
+                storage:
+                  target_storage_type: local
+                  local_settings:
+                    target_base_path: tmp/raw
+                time_frame:
+                  start_year_month: "2026-01"
+                  end_year_month: "2026-02"
+                vehicle_types: ["yellow"]
+                serving:
+                  mimic_current_date: "2026-01-15"
+            """
+        ).strip(),
+        encoding="utf-8",
+    )
+
+    mocker.patch("os.getenv", return_value=None)
+
+    config = load_runtime_config(config_file)
+
+    assert (
+        config["defaults"]["serving"]["streaming"]["kafka"]["client"][
+            "bootstrap_servers"
+        ]
+        == "localhost:9092"
+    )
+
+
+def test_load_runtime_config_raises_when_required_env_var_missing(
+    tmp_path: Path,
+    mocker,
+) -> None:
+    """Raise ValueError when runtime YAML references a required env var without a default."""
+    config_file = tmp_path / "test_runtime.yaml"
+    config_file.write_text(
+        textwrap.dedent(
+            """
+            active_environment: test
+            defaults:
+              serving:
+                streaming:
+                  kafka:
+                    client:
+                      bootstrap_servers: "${KAFKA_BOOTSTRAP_SERVERS}"
+            environments:
+              test:
+                storage:
+                  target_storage_type: local
+                  local_settings:
+                    target_base_path: tmp/raw
+                time_frame:
+                  start_year_month: "2026-01"
+                  end_year_month: "2026-02"
+                vehicle_types: ["yellow"]
+                serving:
+                  mimic_current_date: "2026-01-15"
+            """
+        ).strip(),
+        encoding="utf-8",
+    )
+
+    mocker.patch("os.getenv", return_value=None)
+
+    with pytest.raises(
+        ValueError,
+        match="Missing required environment variable in config substitution: KAFKA_BOOTSTRAP_SERVERS",
+    ):
+        load_runtime_config(config_file)
 
 
 def test_load_runtime_config_raises_file_not_found_for_missing_custom_file(
@@ -280,10 +503,12 @@ def test_load_runtime_config_raises_yaml_error_for_invalid_yaml(
         load_runtime_config(bad_file)
 
 
-def test_load_runtime_config_default_active_env_vehicle_types_have_event_time_mapping() -> (
-    None
-):
+def test_load_runtime_config_default_active_env_vehicle_types_have_event_time_mapping(
+    mocker,
+) -> None:
     """Ensure each active-environment vehicle type has a service event time mapping."""
+    mocker.patch("os.getenv", return_value=None)
+
     config = load_runtime_config()
 
     active_env = config["active_environment"]

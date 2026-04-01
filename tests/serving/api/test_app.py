@@ -1,12 +1,13 @@
 from datetime import datetime
 from pathlib import Path
+from unittest.mock import Mock
 from zoneinfo import ZoneInfo
 
 import polars as pl
 import pytest
 from fastapi.testclient import TestClient
 
-from nyc_taxi_data_service.serving.api.app import app
+import nyc_taxi_data_service.serving.api.app as api_app_module
 from nyc_taxi_data_service.serving.api.service import HistoricalApiService
 
 NY_TZ = ZoneInfo("America/New_York")
@@ -85,14 +86,14 @@ def client(resolved_runtime_config: dict):
     """
     Create a TestClient backed by test app state and clean up after the test.
     """
-    app.state.api_service = HistoricalApiService(
+    api_app_module.app.state.api_service = HistoricalApiService(
         resolved_runtime_config=resolved_runtime_config
     )
-    app.state.service_clock = DummyClock(
+    api_app_module.app.state.service_clock = DummyClock(
         now_value=datetime(2025, 1, 15, 9, 30, 0, tzinfo=NY_TZ)
     )
 
-    with TestClient(app) as test_client:
+    with TestClient(api_app_module.app) as test_client:
         yield test_client
 
 
@@ -272,3 +273,84 @@ def test_get_trips_respects_limit(client: TestClient) -> None:
     assert payload["limit"] == 1
     assert len(payload["rows"]) == 1
     assert payload["rows"][0]["tpep_dropoff_datetime"] == "2025-01-15T09:00:00"
+
+
+def test_create_app_builds_service_clock_with_helper(mocker) -> None:
+    """
+    create_app() should build the app-level ServiceClock via _build_service_clock().
+    """
+    resolved_runtime_config = {
+        "serving": {
+            "mimic_current_date": "2025-01-15",
+            "service_event_time_column_by_vehicle_type": {
+                "yellow": "tpep_dropoff_datetime",
+                "green": "lpep_dropoff_datetime",
+                "fhv": "dropOff_datetime",
+                "fhvhv": "dropoff_datetime",
+            },
+        },
+        "storage": {"target_base_path": "data/raw"},
+    }
+
+    mock_service_clock = Mock()
+    mock_service_clock.mimic_service_start_time = datetime(
+        2025, 1, 15, 9, 30, 0, tzinfo=NY_TZ
+    )
+
+    mock_load_serving_runtime_config = mocker.patch(
+        "nyc_taxi_data_service.serving.api.app.load_serving_runtime_config",
+        return_value=resolved_runtime_config,
+    )
+    mock_build_service_clock = mocker.patch(
+        "nyc_taxi_data_service.serving.api.app._build_service_clock",
+        return_value=mock_service_clock,
+    )
+
+    created_app = api_app_module.create_app()
+
+    mock_load_serving_runtime_config.assert_called_once_with()
+    mock_build_service_clock.assert_called_once_with(resolved_runtime_config)
+
+    assert created_app.state.service_clock is mock_service_clock
+    assert isinstance(created_app.state.api_service, HistoricalApiService)
+
+
+def test_create_app_stores_historical_api_service_with_resolved_config(mocker) -> None:
+    """
+    create_app() should store a HistoricalApiService built from the resolved runtime config.
+    """
+    resolved_runtime_config = {
+        "serving": {
+            "mimic_current_date": "2025-01-15",
+            "service_event_time_column_by_vehicle_type": {
+                "yellow": "tpep_dropoff_datetime",
+                "green": "lpep_dropoff_datetime",
+                "fhv": "dropOff_datetime",
+                "fhvhv": "dropoff_datetime",
+            },
+        },
+        "storage": {"target_base_path": "data/raw"},
+    }
+
+    mocker.patch(
+        "nyc_taxi_data_service.serving.api.app.load_serving_runtime_config",
+        return_value=resolved_runtime_config,
+    )
+
+    mock_service_clock = Mock()
+    mock_service_clock.mimic_service_start_time = datetime(
+        2025, 1, 15, 9, 30, 0, tzinfo=NY_TZ
+    )
+    mocker.patch(
+        "nyc_taxi_data_service.serving.api.app._build_service_clock",
+        return_value=mock_service_clock,
+    )
+
+    created_app = api_app_module.create_app()
+
+    assert created_app.state.service_clock is mock_service_clock
+    assert isinstance(created_app.state.api_service, HistoricalApiService)
+    assert (
+        created_app.state.api_service._resolved_runtime_config
+        == resolved_runtime_config
+    )

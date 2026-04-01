@@ -44,7 +44,7 @@ defaults:
         kafka:
           # client connection settings (bootstrap, security, etc.)
           client:
-            bootstrap_servers: "localhost:9092"
+            bootstrap_servers: "${KAFKA_BOOTSTRAP_SERVERS:-localhost:9092}"
             client_id: "nyc-taxi-data-service"
             # security_protocol: "PLAINTEXT" (add if moving to EC2/SSL later)
 

@@ -1,0 +1,20 @@
+FROM python:3.12-slim
+
+# keep Python output unbuffered and avoid .pyc files in the container
+ENV PYTHONUNBUFFERED=1
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONPATH=/app/src
+
+WORKDIR /app
+
+# install required python package for running serving initializer
+RUN pip install --no-cache-dir pyyaml==6.0.3
+
+# copy only the application source needed by the initializer
+COPY src /app/src
+
+# create the data directory so the mounted volume path exists consistently
+RUN mkdir -p /app/data
+
+# run the initializer entrypoint.
+CMD ["python", "-m", "nyc_taxi_data_service.serving.initializer"]

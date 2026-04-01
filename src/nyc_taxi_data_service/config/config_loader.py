@@ -1,11 +1,64 @@
+import json
 import logging
+import os
+import re
 from copy import deepcopy
 from importlib.resources import files
 from pathlib import Path
 
 import yaml
 
+from nyc_taxi_data_service.utils.log_util import setup_logging
+
 logger = logging.getLogger(__name__)  # initialize default logger
+
+_ENV_VAR_PATTERN = re.compile(r"\$\{([A-Z0-9_]+)(?::-([^}]*))?\}")
+
+
+def _substitute_env_vars(value):
+    """
+    Recursively substitute environment-variable placeholders in loaded config values.
+
+    Supported string forms:
+    - ${VAR}
+    - ${VAR:-default_value}
+
+    Rules:
+    - if VAR is set in the environment, use its value
+    - otherwise, if a default is provided, use the default
+    - otherwise, raise ValueError
+
+    Args:
+        value: A loaded config value, which may be a dict, list, string, or scalar.
+
+    Returns:
+        The same structure with environment placeholders resolved.
+    """
+    if isinstance(value, dict):
+        return {k: _substitute_env_vars(v) for k, v in value.items()}
+
+    if isinstance(value, list):
+        return [_substitute_env_vars(item) for item in value]
+
+    if not isinstance(value, str):
+        return value
+
+    def replace_match(match: re.Match) -> str:
+        env_name = match.group(1)
+        default_value = match.group(2)
+
+        env_value = os.getenv(env_name)
+        if env_value is not None:
+            return env_value
+
+        if default_value is not None:
+            return default_value
+
+        raise ValueError(
+            f"Missing required environment variable in config substitution: {env_name}"
+        )
+
+    return _ENV_VAR_PATTERN.sub(replace_match, value)
 
 
 def load_sources_config(config_path: Path | None = None) -> dict:
@@ -45,6 +98,11 @@ def load_runtime_config(config_path: Path | None = None) -> dict:
     - per-environment settings such as logging, storage,
       request time frame, vehicle types, and serving-related config
 
+    Environment-variable placeholders inside YAML string values are expanded
+    after loading. Supported forms:
+    - ${VAR}
+    - ${VAR:-default_value}
+
     Args:
         config_path: A path to the runtime config yaml file.
             If None, use the default `config/runtime.yaml`
@@ -60,6 +118,9 @@ def load_runtime_config(config_path: Path | None = None) -> dict:
     logger.info(f"Loading runtime config from: {config_file}")
     with config_file.open("r", encoding="utf-8") as f:
         runtime_config = yaml.safe_load(f)
+
+    runtime_config = _substitute_env_vars(runtime_config)
+
     logger.debug(f"Loaded runtime config: {runtime_config}")
 
     return runtime_config
@@ -168,3 +229,26 @@ def resolve_runtime_config(runtime_config: dict) -> dict:
     logger.debug(f"Resolved runtime config: {resolved_config}")
 
     return resolved_config
+
+
+def main() -> None:
+    # load & resolve runtime config
+    runtime_config = load_runtime_config()
+    resolved_runtime_config = resolve_runtime_config(runtime_config)
+
+    # set up logging based on runtime config setting
+    log_level = resolved_runtime_config.get("logging", {}).get("level", "INFO")
+    setup_logging(level=log_level)
+
+    # save resolved runtime config to a json file for reference
+    output_dir = Path("data/manifests/")
+    output_dir.mkdir(parents=True, exist_ok=True)
+    output_file = output_dir / "resolved_runtime_config.json"
+
+    logger.info(f"Resolved runtime config saved as json: {output_file}")
+    with open(output_file, "w") as outfile:
+        json.dump(resolved_runtime_config, outfile)
+
+
+if __name__ == "__main__":
+    main()

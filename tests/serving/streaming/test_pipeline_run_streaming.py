@@ -1,4 +1,4 @@
-from datetime import date, datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone
 from unittest.mock import Mock, call
 from zoneinfo import ZoneInfo
 
@@ -6,6 +6,7 @@ import pytest
 
 from nyc_taxi_data_service.serving.streaming.pipeline import run_streaming
 from tests.helpers.streaming_pipeline_test_helpers import (
+    build_mock_service_clock,
     build_resolved_runtime_config_for_run_streaming,
 )
 
@@ -44,20 +45,19 @@ def test_run_streaming_ensures_topics_builds_components_and_runs_startup_steps(
         return_value=(window_size, retention, publish_interval),
     )
 
-    mock_service_clock = Mock()
-    mock_service_clock.mimic_service_start_time = datetime(
-        2025, 1, 15, 8, 0, tzinfo=NY_TZ
+    mock_service_clock = build_mock_service_clock(
+        now_side_effect=[
+            datetime(2025, 1, 15, 8, 0, tzinfo=NY_TZ),
+            stream_end_time,
+        ]
     )
-    # first now() -> initial publish, second now() -> main loop exits on exhaustion
-    mock_service_clock.now.side_effect = [
-        datetime(2025, 1, 15, 8, 0, tzinfo=NY_TZ),
-        stream_end_time,
-    ]
     mock_service_clock_cls = mocker.patch(
-        "nyc_taxi_data_service.serving.streaming.pipeline.ServiceClock",
+        "nyc_taxi_data_service.serving.streaming.pipeline._build_service_clock",
         return_value=mock_service_clock,
     )
-
+    mock_wait_for_kafka_ready = mocker.patch(
+        "nyc_taxi_data_service.serving.streaming.pipeline.wait_for_kafka_ready"
+    )
     mock_ensure_topics = mocker.patch(
         "nyc_taxi_data_service.serving.streaming.pipeline.ensure_streaming_topics_exist"
     )
@@ -79,7 +79,6 @@ def test_run_streaming_ensures_topics_builds_components_and_runs_startup_steps(
 
     run_streaming(resolved_runtime_config)
 
-    mock_service_clock_cls.assert_called_once_with(mimic_current_date=date(2025, 1, 15))
     mock_ensure_topics.assert_called_once_with(
         vehicle_types=["yellow", "green"],
         resolved_runtime_config=resolved_runtime_config,
@@ -120,17 +119,18 @@ def test_run_streaming_runs_final_publish_when_stream_is_exhausted(
         return_value=(window_size, retention, publish_interval),
     )
 
-    mock_service_clock = Mock()
-    mock_service_clock.mimic_service_start_time = datetime(
-        2025, 1, 15, 8, 0, tzinfo=NY_TZ
-    )
     initial_publish_time = datetime(2025, 1, 15, 8, 0, tzinfo=NY_TZ)
     final_publish_time = stream_end_time
-    mock_service_clock.now.side_effect = [initial_publish_time, final_publish_time]
+    mock_service_clock = build_mock_service_clock(
+        now_side_effect=[initial_publish_time, final_publish_time]
+    )
 
     mocker.patch(
-        "nyc_taxi_data_service.serving.streaming.pipeline.ServiceClock",
+        "nyc_taxi_data_service.serving.streaming.pipeline._build_service_clock",
         return_value=mock_service_clock,
+    )
+    mock_wait_for_kafka_ready = mocker.patch(
+        "nyc_taxi_data_service.serving.streaming.pipeline.wait_for_kafka_ready"
     )
     mocker.patch(
         "nyc_taxi_data_service.serving.streaming.pipeline.ensure_streaming_topics_exist"
@@ -190,17 +190,18 @@ def test_run_streaming_closes_all_replay_producers_in_finally(
         return_value=(window_size, retention, publish_interval),
     )
 
-    mock_service_clock = Mock()
-    mock_service_clock.mimic_service_start_time = datetime(
-        2025, 1, 15, 8, 0, tzinfo=NY_TZ
+    mock_service_clock = build_mock_service_clock(
+        now_side_effect=[
+            datetime(2025, 1, 15, 8, 0, tzinfo=NY_TZ),
+            stream_end_time,
+        ]
     )
-    mock_service_clock.now.side_effect = [
-        datetime(2025, 1, 15, 8, 0, tzinfo=NY_TZ),
-        stream_end_time,
-    ]
     mocker.patch(
-        "nyc_taxi_data_service.serving.streaming.pipeline.ServiceClock",
+        "nyc_taxi_data_service.serving.streaming.pipeline._build_service_clock",
         return_value=mock_service_clock,
+    )
+    mock_wait_for_kafka_ready = mocker.patch(
+        "nyc_taxi_data_service.serving.streaming.pipeline.wait_for_kafka_ready"
     )
     mocker.patch(
         "nyc_taxi_data_service.serving.streaming.pipeline.ensure_streaming_topics_exist"
@@ -248,18 +249,19 @@ def test_run_streaming_does_not_buffer_when_next_window_is_far_enough_ahead(
         return_value=(window_size, retention, publish_interval),
     )
 
-    mock_service_clock = Mock()
-    mock_service_clock.mimic_service_start_time = datetime(
-        2025, 1, 15, 8, 0, tzinfo=NY_TZ
+    mock_service_clock = build_mock_service_clock(
+        now_side_effect=[
+            datetime(2025, 1, 15, 8, 0, tzinfo=NY_TZ),
+            first_loop_mimic_time,
+            stream_end_time,
+        ]
     )
-    mock_service_clock.now.side_effect = [
-        datetime(2025, 1, 15, 8, 0, tzinfo=NY_TZ),
-        first_loop_mimic_time,
-        stream_end_time,
-    ]
     mocker.patch(
-        "nyc_taxi_data_service.serving.streaming.pipeline.ServiceClock",
+        "nyc_taxi_data_service.serving.streaming.pipeline._build_service_clock",
         return_value=mock_service_clock,
+    )
+    mock_wait_for_kafka_ready = mocker.patch(
+        "nyc_taxi_data_service.serving.streaming.pipeline.wait_for_kafka_ready"
     )
     mocker.patch(
         "nyc_taxi_data_service.serving.streaming.pipeline.ensure_streaming_topics_exist"
@@ -344,18 +346,19 @@ def test_run_streaming_buffers_and_deletes_expired_rows_when_not_half_window_ahe
         return_value=(window_size, retention, publish_interval),
     )
 
-    mock_service_clock = Mock()
-    mock_service_clock.mimic_service_start_time = datetime(
-        2025, 1, 15, 8, 0, tzinfo=NY_TZ
+    mock_service_clock = build_mock_service_clock(
+        now_side_effect=[
+            datetime(2025, 1, 15, 8, 0, tzinfo=NY_TZ),
+            first_loop_mimic_time,
+            stream_end_time,
+        ]
     )
-    mock_service_clock.now.side_effect = [
-        datetime(2025, 1, 15, 8, 0, tzinfo=NY_TZ),  # initial publish
-        first_loop_mimic_time,  # main loop iteration
-        stream_end_time,  # next loop -> exit
-    ]
     mocker.patch(
-        "nyc_taxi_data_service.serving.streaming.pipeline.ServiceClock",
+        "nyc_taxi_data_service.serving.streaming.pipeline._build_service_clock",
         return_value=mock_service_clock,
+    )
+    mock_wait_for_kafka_ready = mocker.patch(
+        "nyc_taxi_data_service.serving.streaming.pipeline.wait_for_kafka_ready"
     )
     mocker.patch(
         "nyc_taxi_data_service.serving.streaming.pipeline.ensure_streaming_topics_exist"
@@ -431,18 +434,19 @@ def test_run_streaming_does_not_delete_expired_rows_when_buffering_is_skipped(
         return_value=(window_size, retention, publish_interval),
     )
 
-    mock_service_clock = Mock()
-    mock_service_clock.mimic_service_start_time = datetime(
-        2025, 1, 15, 8, 0, tzinfo=NY_TZ
+    mock_service_clock = build_mock_service_clock(
+        now_side_effect=[
+            datetime(2025, 1, 15, 8, 0, tzinfo=NY_TZ),
+            first_loop_mimic_time,
+            stream_end_time,
+        ]
     )
-    mock_service_clock.now.side_effect = [
-        datetime(2025, 1, 15, 8, 0, tzinfo=NY_TZ),  # initial publish
-        first_loop_mimic_time,  # main loop iteration
-        stream_end_time,  # next loop -> exit
-    ]
     mocker.patch(
-        "nyc_taxi_data_service.serving.streaming.pipeline.ServiceClock",
+        "nyc_taxi_data_service.serving.streaming.pipeline._build_service_clock",
         return_value=mock_service_clock,
+    )
+    mock_wait_for_kafka_ready = mocker.patch(
+        "nyc_taxi_data_service.serving.streaming.pipeline.wait_for_kafka_ready"
     )
     mocker.patch(
         "nyc_taxi_data_service.serving.streaming.pipeline.ensure_streaming_topics_exist"
@@ -496,9 +500,6 @@ def test_run_streaming_deletes_expired_rows_after_each_buffer_fill_when_catching
     resolved_runtime_config = build_resolved_runtime_config_for_run_streaming()
     resolved_runtime_config["vehicle_types"] = ["yellow"]
 
-    window_size = timedelta(minutes=30)
-    retention = timedelta(minutes=30)
-    publish_interval = timedelta(seconds=5)
     stream_end_time = datetime(2025, 1, 15, 10, 0, tzinfo=NY_TZ)
     first_loop_mimic_time = datetime(2025, 1, 15, 8, 40, tzinfo=NY_TZ)
 
@@ -511,18 +512,19 @@ def test_run_streaming_deletes_expired_rows_after_each_buffer_fill_when_catching
         return_value=(window_size, retention, publish_interval),
     )
 
-    mock_service_clock = Mock()
-    mock_service_clock.mimic_service_start_time = datetime(
-        2025, 1, 15, 8, 0, tzinfo=NY_TZ
+    mock_service_clock = build_mock_service_clock(
+        now_side_effect=[
+            datetime(2025, 1, 15, 8, 0, tzinfo=NY_TZ),
+            first_loop_mimic_time,
+            stream_end_time,
+        ]
     )
-    mock_service_clock.now.side_effect = [
-        datetime(2025, 1, 15, 8, 0, tzinfo=NY_TZ),  # initial publish
-        first_loop_mimic_time,  # first main-loop iteration
-        stream_end_time,  # second main-loop iteration -> exit
-    ]
     mocker.patch(
-        "nyc_taxi_data_service.serving.streaming.pipeline.ServiceClock",
+        "nyc_taxi_data_service.serving.streaming.pipeline._build_service_clock",
         return_value=mock_service_clock,
+    )
+    mock_wait_for_kafka_ready = mocker.patch(
+        "nyc_taxi_data_service.serving.streaming.pipeline.wait_for_kafka_ready"
     )
     mocker.patch(
         "nyc_taxi_data_service.serving.streaming.pipeline.ensure_streaming_topics_exist"

@@ -1,0 +1,20 @@
+FROM python:3.12-slim
+
+ENV PYTHONUNBUFFERED=1
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONPATH=/app/src
+
+WORKDIR /app
+
+RUN pip install --no-cache-dir \
+    confluent-kafka==2.13.2 \
+    duckdb==1.5.0 \
+    polars==1.39.3 \
+    pyarrow==23.0.1 \
+    pyyaml==6.0.3
+
+COPY src /app/src
+
+RUN mkdir -p /app/data
+
+CMD ["python", "-m", "nyc_taxi_data_service.serving.streaming.pipeline"]

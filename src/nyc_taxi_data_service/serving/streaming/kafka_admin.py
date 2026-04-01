@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import time
 
 from confluent_kafka.admin import AdminClient, NewTopic
 from confluent_kafka.cimpl import KafkaException
@@ -238,4 +239,90 @@ def ensure_streaming_topics_exist(
     logger.info(
         "Finished ensuring streaming Kafka topics exist | ensured_topics=%s",
         [f"{topic_prefix}_{vehicle_type}" for vehicle_type in vehicle_types],
+    )
+
+
+def wait_for_kafka_ready(
+    resolved_runtime_config: dict,
+    timeout_seconds: float = 60.0,
+    retry_interval_seconds: float = 2.0,
+    metadata_timeout_seconds: float = 5.0,
+) -> None:
+    """
+    Wait until Kafka is reachable and responds to an admin metadata request.
+
+    This helper is intended for service startup. It retries a lightweight Kafka
+    admin operation until either:
+    - Kafka responds successfully, or
+    - the overall timeout is reached
+
+    Readiness definition:
+    - Kafka must be reachable via the configured bootstrap servers
+    - AdminClient.list_topics(...) must return cluster metadata successfully
+
+    Args:
+        resolved_runtime_config: Fully resolved runtime config dictionary.
+        timeout_seconds: Maximum total time to wait before failing startup.
+        retry_interval_seconds: Delay between retry attempts.
+        metadata_timeout_seconds: Per-attempt timeout for Kafka metadata lookup.
+
+    Raises:
+        KafkaException:
+            If Kafka does not become ready before the timeout.
+    """
+    kafka_config = resolved_runtime_config["serving"]["streaming"]["kafka"]
+    client_config = build_admin_client_config(kafka_config=kafka_config)
+    bootstrap_servers = client_config["bootstrap.servers"]
+
+    logger.info(
+        "Waiting for Kafka readiness | bootstrap_servers=%s | timeout_seconds=%.1f | retry_interval_seconds=%.1f",
+        bootstrap_servers,
+        timeout_seconds,
+        retry_interval_seconds,
+    )
+
+    deadline = time.monotonic() + timeout_seconds
+    attempt = 1
+    last_exception: Exception | None = None
+
+    while time.monotonic() < deadline:
+        admin_client = AdminClient(client_config)
+
+        try:
+            # check if metadata can be fetched
+            admin_client.list_topics(timeout=metadata_timeout_seconds)
+
+            logger.info(
+                "Kafka is ready | bootstrap_servers=%s | attempts=%s",
+                bootstrap_servers,
+                attempt,
+            )
+            return
+
+        except KafkaException as exc:
+            last_exception = exc
+            remaining_seconds = max(0.0, deadline - time.monotonic())
+
+            logger.warning(
+                "Kafka not ready yet; retrying | bootstrap_servers=%s | attempt=%s | retry_in=%.1fs | remaining_timeout=%.1fs | error=%s",
+                bootstrap_servers,
+                attempt,
+                retry_interval_seconds,
+                remaining_seconds,
+                exc,
+            )
+            time.sleep(retry_interval_seconds)
+            attempt += 1
+
+    logger.exception(
+        "Kafka did not become ready before timeout | bootstrap_servers=%s | timeout_seconds=%.1f",
+        bootstrap_servers,
+        timeout_seconds,
+    )
+
+    if last_exception is not None:
+        raise last_exception
+
+    raise RuntimeError(
+        f"Kafka did not become ready before timeout: {bootstrap_servers}"
     )
