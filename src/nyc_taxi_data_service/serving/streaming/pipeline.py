@@ -4,14 +4,16 @@ import time
 from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
-from nyc_taxi_data_service.config.config_loader import (
-    load_runtime_config,
-    resolve_runtime_config,
-)
 from nyc_taxi_data_service.serving.common.log_time import format_log_dt
-from nyc_taxi_data_service.serving.common.service_clock import ServiceClock
+from nyc_taxi_data_service.serving.common.service_clock_loader import (
+    _build_service_clock,
+)
+from nyc_taxi_data_service.serving.common.startup_context_loader import (
+    load_serving_runtime_config,
+)
 from nyc_taxi_data_service.serving.streaming.kafka_admin import (
     ensure_streaming_topics_exist,
+    wait_for_kafka_ready,
 )
 from nyc_taxi_data_service.serving.streaming.kafka_producer import KafkaReplayProducer
 from nyc_taxi_data_service.serving.streaming.window_buffer import (
@@ -323,7 +325,7 @@ def run_streaming(resolved_runtime_config: dict) -> None:
 
     # create one shared `ServiceClock` for the whole streaming service
     # & derive mimic_service_start_time
-    service_clock = ServiceClock.from_new_session(mimic_current_date=mimic_current_date)
+    service_clock = _build_service_clock(resolved_runtime_config)
     mimic_service_start_time = service_clock.mimic_service_start_time
     logger.info(
         "Service clock started | real_service_start_time=%s | mimic_service_start_time=%s",
@@ -342,6 +344,16 @@ def run_streaming(resolved_runtime_config: dict) -> None:
     replay_producers: dict[str, KafkaReplayProducer] = {}
 
     try:
+        # wait until Kafka is actually ready to respond before running
+        # topic-admin startup steps
+        # (docker container start order alone does not guarantee Kafka readiness)
+        wait_for_kafka_ready(
+            resolved_runtime_config=resolved_runtime_config,
+            timeout_seconds=60.0,
+            retry_interval_seconds=2.0,
+            metadata_timeout_seconds=5.0,
+        )
+
         # ensure all required kafka topics exist before creating replay producers
         ensure_streaming_topics_exist(
             vehicle_types=vehicle_types, resolved_runtime_config=resolved_runtime_config
@@ -472,9 +484,10 @@ def main() -> None:
 
     Loads runtime config, configures logging, and starts the streaming loop.
     """
-    # load & resolve runtime config
-    runtime_config = load_runtime_config()
-    resolved_runtime_config = resolve_runtime_config(runtime_config)
+    # load runtime config:
+    # - with SERVICE_STARTUP_CONTEXT_PATH env variable -> use shared startup context JSON
+    # - otherwise -> resolve runtime.yaml (standalone mode)
+    resolved_runtime_config = load_serving_runtime_config()
 
     # set up logging based on runtime config setting
     log_level = resolved_runtime_config.get("logging", {}).get("level", "INFO")

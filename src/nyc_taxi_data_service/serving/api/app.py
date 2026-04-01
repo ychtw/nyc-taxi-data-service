@@ -5,13 +5,14 @@ from datetime import date, datetime
 import duckdb
 from fastapi import Depends, FastAPI, Request
 
-from nyc_taxi_data_service.config.config_loader import (
-    load_runtime_config,
-    resolve_runtime_config,
-)
 from nyc_taxi_data_service.serving.api.service import HistoricalApiService
 from nyc_taxi_data_service.serving.common.log_time import format_log_dt
-from nyc_taxi_data_service.serving.common.service_clock import ServiceClock
+from nyc_taxi_data_service.serving.common.service_clock_loader import (
+    _build_service_clock,
+)
+from nyc_taxi_data_service.serving.common.startup_context_loader import (
+    load_serving_runtime_config,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -39,17 +40,16 @@ def create_app() -> FastAPI:
     """
     app = FastAPI()
 
-    # load and resolve runtime configuration once during app setup
-    runtime_config = load_runtime_config()
-    resolved_runtime_config = resolve_runtime_config(runtime_config)
+    # load runtime config:
+    # - with SERVICE_STARTUP_CONTEXT_PATH env variable -> use shared startup context JSON
+    # - otherwise -> resolve runtime.yaml (standalone mode)
+    resolved_runtime_config = load_serving_runtime_config()
 
     # build long-lived API service components once and store them on app state
     mimic_current_date = date.fromisoformat(
         resolved_runtime_config["serving"]["mimic_current_date"]
     )
-    app.state.service_clock = ServiceClock.from_new_session(
-        mimic_current_date=mimic_current_date
-    )
+    app.state.service_clock = _build_service_clock(resolved_runtime_config)
     app.state.api_service = HistoricalApiService(
         resolved_runtime_config=resolved_runtime_config
     )

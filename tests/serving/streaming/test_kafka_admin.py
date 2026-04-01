@@ -461,3 +461,208 @@ def test_ensure_streaming_topics_exist_reraises_downstream_topic_error(
             vehicle_types=["yellow", "green"],
             resolved_runtime_config=resolved_runtime_config,
         )
+
+
+def test_wait_for_kafka_ready_returns_immediately_when_kafka_is_ready(
+    monkeypatch: pytest.MonkeyPatch,
+    dummy_admin_config: dict,
+) -> None:
+    """
+    Return on the first successful metadata lookup without sleeping.
+
+    This is the fast path during service startup when Kafka is already reachable.
+    """
+    resolved_runtime_config = build_minimal_resolved_runtime_config()
+    admin_client_instances: list[DummyAdminClient] = []
+    sleep_calls: list[float] = []
+
+    class DummyAdminClientFactory:
+        """Create a fresh dummy admin client for each readiness-check attempt."""
+
+        def __init__(self, config: dict) -> None:
+            assert config == dummy_admin_config
+
+            client = DummyAdminClient(
+                config=config,
+                existing_topics={},
+            )
+            admin_client_instances.append(client)
+            self._client = client
+
+        def list_topics(self, timeout: float) -> object:
+            """Delegate metadata lookup to the underlying dummy client."""
+            return self._client.list_topics(timeout=timeout)
+
+    monotonic_values = iter([100.0, 101.0])
+
+    monkeypatch.setattr(kafka_admin, "AdminClient", DummyAdminClientFactory)
+    monkeypatch.setattr(
+        kafka_admin.time,
+        "monotonic",
+        lambda: next(monotonic_values),
+    )
+    monkeypatch.setattr(
+        kafka_admin.time,
+        "sleep",
+        lambda seconds: sleep_calls.append(seconds),
+    )
+
+    kafka_admin.wait_for_kafka_ready(
+        resolved_runtime_config=resolved_runtime_config,
+        timeout_seconds=60.0,
+        retry_interval_seconds=2.0,
+        metadata_timeout_seconds=5.0,
+    )
+
+    assert len(admin_client_instances) == 1
+    assert admin_client_instances[0].list_topics_called_with == {"timeout": 5.0}
+    assert sleep_calls == []
+
+
+def test_wait_for_kafka_ready_retries_until_kafka_becomes_ready(
+    monkeypatch: pytest.MonkeyPatch,
+    dummy_admin_config: dict,
+) -> None:
+    """
+    Retry readiness checks until a later attempt succeeds.
+
+    This covers the normal container-startup race where Kafka is not ready on
+    the first probe but becomes reachable shortly afterward.
+    """
+    resolved_runtime_config = build_minimal_resolved_runtime_config()
+    admin_client_instances: list[DummyAdminClient] = []
+    sleep_calls: list[float] = []
+
+    outcomes = iter(
+        [
+            KafkaException("broker not available"),
+            KafkaException("broker not available"),
+            None,
+        ]
+    )
+
+    class DummyAdminClientFactory:
+        """Create per-attempt dummy admin clients with staged outcomes."""
+
+        def __init__(self, config: dict) -> None:
+            assert config == dummy_admin_config
+
+            list_topics_error = next(outcomes)
+            client = DummyAdminClient(
+                config=config,
+                existing_topics={},
+                list_topics_error=list_topics_error,
+            )
+            admin_client_instances.append(client)
+            self._client = client
+
+        def list_topics(self, timeout: float) -> object:
+            """Delegate metadata lookup to the underlying dummy client."""
+            return self._client.list_topics(timeout=timeout)
+
+    monotonic_values = iter(
+        [
+            100.0,  # deadline = 110.0
+            101.0,  # while check -> attempt 1
+            102.0,  # remaining timeout after failure 1
+            103.0,  # while check -> attempt 2
+            104.0,  # remaining timeout after failure 2
+            105.0,  # while check -> attempt 3 succeeds
+        ]
+    )
+
+    monkeypatch.setattr(kafka_admin, "AdminClient", DummyAdminClientFactory)
+    monkeypatch.setattr(
+        kafka_admin.time,
+        "monotonic",
+        lambda: next(monotonic_values),
+    )
+    monkeypatch.setattr(
+        kafka_admin.time,
+        "sleep",
+        lambda seconds: sleep_calls.append(seconds),
+    )
+
+    kafka_admin.wait_for_kafka_ready(
+        resolved_runtime_config=resolved_runtime_config,
+        timeout_seconds=10.0,
+        retry_interval_seconds=2.0,
+        metadata_timeout_seconds=5.0,
+    )
+
+    assert len(admin_client_instances) == 3
+    assert [client.list_topics_called_with for client in admin_client_instances] == [
+        {"timeout": 5.0},
+        {"timeout": 5.0},
+        {"timeout": 5.0},
+    ]
+    assert sleep_calls == [2.0, 2.0]
+
+
+def test_wait_for_kafka_ready_reraises_last_kafka_exception_after_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+    dummy_admin_config: dict,
+) -> None:
+    """
+    Re-raise the last KafkaException when readiness never succeeds before timeout.
+    """
+    resolved_runtime_config = build_minimal_resolved_runtime_config()
+    admin_client_instances: list[DummyAdminClient] = []
+    sleep_calls: list[float] = []
+    kafka_error = KafkaException("broker not available")
+
+    class DummyAdminClientFactory:
+        """Create a failing dummy admin client for each retry attempt."""
+
+        def __init__(self, config: dict) -> None:
+            assert config == dummy_admin_config
+
+            client = DummyAdminClient(
+                config=config,
+                existing_topics={},
+                list_topics_error=kafka_error,
+            )
+            admin_client_instances.append(client)
+            self._client = client
+
+        def list_topics(self, timeout: float) -> object:
+            """Delegate metadata lookup to the underlying dummy client."""
+            return self._client.list_topics(timeout=timeout)
+
+    monotonic_values = iter(
+        [
+            100.0,  # deadline = 105.0
+            100.0,  # while check -> attempt 1
+            101.0,  # remaining timeout after failure 1
+            102.0,  # while check -> attempt 2
+            104.0,  # remaining timeout after failure 2
+            106.0,  # while check -> exit
+        ]
+    )
+
+    monkeypatch.setattr(kafka_admin, "AdminClient", DummyAdminClientFactory)
+    monkeypatch.setattr(
+        kafka_admin.time,
+        "monotonic",
+        lambda: next(monotonic_values),
+    )
+    monkeypatch.setattr(
+        kafka_admin.time,
+        "sleep",
+        lambda seconds: sleep_calls.append(seconds),
+    )
+
+    with pytest.raises(KafkaException):
+        kafka_admin.wait_for_kafka_ready(
+            resolved_runtime_config=resolved_runtime_config,
+            timeout_seconds=5.0,
+            retry_interval_seconds=2.0,
+            metadata_timeout_seconds=5.0,
+        )
+
+    assert len(admin_client_instances) == 2
+    assert [client.list_topics_called_with for client in admin_client_instances] == [
+        {"timeout": 5.0},
+        {"timeout": 5.0},
+    ]
+    assert sleep_calls == [2.0, 2.0]
