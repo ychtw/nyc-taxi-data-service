@@ -357,10 +357,7 @@ class HistoricalApiService:
             # first-page query: apply only the base request window filter
             query = textwrap.dedent(
                 f"""
-                SELECT
-                    *,
-                    filename,
-                    file_row_number
+                SELECT *
                 FROM read_parquet(?, filename=True, file_row_number=True)
                 WHERE {event_time_column} >= ?
                     AND {event_time_column} < ?
@@ -392,10 +389,7 @@ class HistoricalApiService:
 
         query = textwrap.dedent(
             f"""
-            SELECT
-                *,
-                filename,
-                file_row_number
+            SELECT *
             FROM read_parquet(?, filename=True, file_row_number=True)
             WHERE {event_time_column} >= ?
                 AND {event_time_column} < ?
