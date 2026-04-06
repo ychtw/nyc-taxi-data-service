@@ -3,7 +3,7 @@ from collections.abc import Generator
 from datetime import date, datetime
 
 import duckdb
-from fastapi import Depends, FastAPI, Request
+from fastapi import APIRouter, Depends, FastAPI, Request
 
 from nyc_taxi_data_service.serving.api.rate_limit import (
     GlobalConcurrencyLimiter,
@@ -43,6 +43,7 @@ def create_app() -> FastAPI:
     Create and configure the FastAPI application for the historical data API service.
     """
     app = FastAPI()
+    api_router = APIRouter(prefix="/api/v1")
 
     # load runtime config:
     # - with SERVICE_STARTUP_CONTEXT_PATH env variable -> use shared startup context JSON
@@ -73,7 +74,7 @@ def create_app() -> FastAPI:
         format_log_dt(app.state.service_clock.mimic_service_start_time),
     )
 
-    @app.get("/trips/{vehicle_type}")
+    @api_router.get("/trips/{vehicle_type}")
     def get_trips(
         request: Request,
         vehicle_type: str,
@@ -127,6 +128,8 @@ def create_app() -> FastAPI:
             mimic_current_time=mimic_current_time,
             con=con,
         )
+
+    app.include_router(api_router)
 
     return app
 
