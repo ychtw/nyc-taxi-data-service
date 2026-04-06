@@ -104,7 +104,7 @@ def test_get_trips_returns_rows_and_pagination_metadata_for_valid_request(
     Return matching rows and expected pagination metadata for a valid first-page request.
     """
     response = client.get(
-        "/trips/yellow",
+        "/api/v1/trips/yellow",
         params={
             "start_time": "2025-01-15T09:00:00",
             "end_time": "2025-01-15T09:01:00",
@@ -144,7 +144,7 @@ def test_get_trips_returns_400_for_unsupported_vehicle_type(
     Reject requests for vehicle types that are not supported by config.
     """
     response = client.get(
-        "/trips/fakeveh",
+        "/api/v1/trips/fakeveh",
         params={
             "start_time": "2025-01-15T09:00:00",
             "end_time": "2025-01-15T09:01:00",
@@ -165,7 +165,7 @@ def test_get_trips_returns_400_when_start_time_is_not_earlier_than_end_time(
     Reject requests whose time window is empty or reversed.
     """
     response = client.get(
-        "/trips/yellow",
+        "/api/v1/trips/yellow",
         params={
             "start_time": "2025-01-15T09:01:00",
             "end_time": "2025-01-15T09:01:00",
@@ -186,7 +186,7 @@ def test_get_trips_returns_400_when_limit_is_not_positive(
     Reject requests whose limit is zero or negative.
     """
     response = client.get(
-        "/trips/yellow",
+        "/api/v1/trips/yellow",
         params={
             "start_time": "2025-01-15T09:00:00",
             "end_time": "2025-01-15T09:01:00",
@@ -207,7 +207,7 @@ def test_get_trips_returns_400_when_limit_exceeds_maximum(
     Reject requests whose limit exceeds the maximum allowed page size.
     """
     response = client.get(
-        "/trips/yellow",
+        "/api/v1/trips/yellow",
         params={
             "start_time": "2025-01-15T09:00:00",
             "end_time": "2025-01-15T09:01:00",
@@ -228,7 +228,7 @@ def test_get_trips_returns_400_when_end_time_exceeds_available_range(
     Reject requests whose end_time exceeds the current API availability boundary.
     """
     response = client.get(
-        "/trips/yellow",
+        "/api/v1/trips/yellow",
         params={
             "start_time": "2025-01-15T09:00:00",
             "end_time": "2025-01-15T09:31:00",
@@ -251,7 +251,7 @@ def test_get_trips_returns_422_for_invalid_datetime_input(
     Let FastAPI reject malformed datetime query parameters before endpoint logic runs.
     """
     response = client.get(
-        "/trips/yellow",
+        "/api/v1/trips/yellow",
         params={
             "start_time": "abc",
             "end_time": "2025-01-15T09:01:00",
@@ -269,7 +269,7 @@ def test_get_trips_returns_empty_rows_when_no_records_match(
     Return an empty rows list when the request is valid but no data matches.
     """
     response = client.get(
-        "/trips/yellow",
+        "/api/v1/trips/yellow",
         params={
             "start_time": "2025-01-15T08:00:00",
             "end_time": "2025-01-15T08:01:00",
@@ -294,7 +294,7 @@ def test_get_trips_returns_next_cursor_when_more_rows_exist(
     Return a next cursor and set has_more when additional rows remain after the current page.
     """
     response = client.get(
-        "/trips/yellow",
+        "/api/v1/trips/yellow",
         params={
             "start_time": "2025-01-15T09:00:00",
             "end_time": "2025-01-15T09:02:00",
@@ -322,7 +322,7 @@ def test_get_trips_accepts_cursor_and_returns_continuation_page(
     Return the next page of rows when the client supplies a valid cursor.
     """
     first_response = client.get(
-        "/trips/yellow",
+        "/api/v1/trips/yellow",
         params={
             "start_time": "2025-01-15T09:00:00",
             "end_time": "2025-01-15T09:02:00",
@@ -336,7 +336,7 @@ def test_get_trips_accepts_cursor_and_returns_continuation_page(
     assert first_payload["next_cursor"] is not None
 
     second_response = client.get(
-        "/trips/yellow",
+        "/api/v1/trips/yellow",
         params={
             "start_time": "2025-01-15T09:00:00",
             "end_time": "2025-01-15T09:02:00",
@@ -362,7 +362,7 @@ def test_get_trips_returns_400_for_invalid_cursor(
     Reject continuation requests whose cursor is malformed.
     """
     response = client.get(
-        "/trips/yellow",
+        "/api/v1/trips/yellow",
         params={
             "start_time": "2025-01-15T09:00:00",
             "end_time": "2025-01-15T09:02:00",
@@ -382,7 +382,7 @@ def test_get_trips_respects_limit(client: TestClient) -> None:
     Return no more than the requested number of rows.
     """
     response = client.get(
-        "/trips/yellow",
+        "/api/v1/trips/yellow",
         params={
             "start_time": "2025-01-15T09:00:00",
             "end_time": "2025-01-15T09:02:00",
@@ -509,7 +509,7 @@ def test_get_trips_full_pagination_traversal(client: TestClient) -> None:
 
     while True:
         response = client.get(
-            "/trips/yellow",
+            "/api/v1/trips/yellow",
             params={
                 "start_time": "2025-01-15T09:00:00",
                 "end_time": "2025-01-15T09:02:00",
@@ -558,7 +558,7 @@ def test_pagination_has_no_duplicates(client: TestClient):
 
     while True:
         response = client.get(
-            "/trips/yellow",
+            "/api/v1/trips/yellow",
             params={
                 "start_time": "2025-01-15T09:00:00",
                 "end_time": "2025-01-15T09:02:00",
@@ -595,7 +595,7 @@ def test_cursor_is_deterministic(client: TestClient):
     implicit state.
     """
     first = client.get(
-        "/trips/yellow",
+        "/api/v1/trips/yellow",
         params={
             "start_time": "2025-01-15T09:00:00",
             "end_time": "2025-01-15T09:02:00",
@@ -606,7 +606,7 @@ def test_cursor_is_deterministic(client: TestClient):
     cursor = first["next_cursor"]
 
     second_a = client.get(
-        "/trips/yellow",
+        "/api/v1/trips/yellow",
         params={
             "start_time": "2025-01-15T09:00:00",
             "end_time": "2025-01-15T09:02:00",
@@ -616,7 +616,7 @@ def test_cursor_is_deterministic(client: TestClient):
     ).json()
 
     second_b = client.get(
-        "/trips/yellow",
+        "/api/v1/trips/yellow",
         params={
             "start_time": "2025-01-15T09:00:00",
             "end_time": "2025-01-15T09:02:00",
@@ -643,7 +643,7 @@ def test_pagination_respects_limit_on_all_pages(client: TestClient):
 
     while True:
         response = client.get(
-            "/trips/yellow",
+            "/api/v1/trips/yellow",
             params={
                 "start_time": "2025-01-15T09:00:00",
                 "end_time": "2025-01-15T09:02:00",
