@@ -2,10 +2,14 @@ import json
 import logging
 import shutil
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
 
 import requests
+from requests.adapters import HTTPAdapter
+from tqdm import tqdm
+from urllib3.util.retry import Retry
 
 from nyc_taxi_data_service.config.config_loader import (
     load_runtime_config,
@@ -28,10 +32,10 @@ def load_manifest(manifest_path: Path | str) -> dict:
     """
     manifest_file = Path(manifest_path)
 
-    logger.info(f"Loading manifest from {manifest_file}")
+    logger.info("Loading manifest from %s", manifest_file)
     with manifest_file.open("r", encoding="utf-8") as f:
         manifest = json.load(f)
-    logger.debug(f"Loaded manifest: {manifest}")
+    logger.debug("Loaded manifest: %s", manifest)
 
     return manifest
 
@@ -51,82 +55,20 @@ def resolve_target_path(
         Full target path where file should be downloaded
     """
     full_target_path = Path(target_base_path) / target_relative_path
-    logger.debug(f"Resolved target path: {full_target_path}")
+    logger.debug("Resolved target path: %s", full_target_path)
 
     return full_target_path
 
 
-def get_remote_file_metadata(source_url: str, timeout: int = 30) -> dict:
-    """
-    Fetch remote file metadata using an HTTP HEAD request.
-
-    Args:
-        source_url: source file URL
-        timeout: request timeout in seconds
-
-    Returns:
-        A dictionary containing remote file metadata
-    """
-    logger.debug(f"Fetching remote metadata for {source_url}")
-
-    try:
-        response = requests.head(source_url, allow_redirects=True, timeout=timeout)
-
-        content_length_raw = response.headers.get("Content-Length")
-        content_length = int(content_length_raw) if content_length_raw else None
-
-        metadata = {
-            "source_url": source_url,
-            "status_code": response.status_code,
-            "ok": response.ok,
-            "content_length": content_length,
-            "content_type": response.headers.get("Content-Type"),
-            "etag": response.headers.get("ETag"),
-            "last_modified": response.headers.get("Last-Modified"),
-        }
-        logger.debug(f"Remote metadata fetched: {metadata}")
-
-        return metadata
-
-    except requests.RequestException as e:
-        logger.error(f"Failed to fetch metadata for {source_url}: {str(e)}")
-        raise
-
-
-# TODO: current version assumes manifest_entries and remote_metadata_list follow the same order
-def attach_remote_metadata_to_entries(
-    manifest_entries: list[dict],
-    remote_metadata_list: list[dict],
-) -> list[dict]:
-    """
-    Attach remote metadata to each manifest entry.
-    Note: assumes manifest_entries and remote_metadata_list follow the same order
-
-    Args:
-        manifest_entries: list of manifest entry dictionaries
-        remote_metadata_list: list of remote metadata dictionaries in matching order
-
-    Returns:
-        New list of manifest entries enriched with remote metadata
-    """
-    logger.debug(
-        "Attaching %d remote metadata to %d manifest entries",
-        len(remote_metadata_list),
-        len(manifest_entries),
-    )
-    enriched_entries = []
-
-    for entry, metadata in zip(manifest_entries, remote_metadata_list, strict=True):
-        enriched_entry = dict(entry)
-        enriched_entry["remote_metadata"] = metadata
-        enriched_entries.append(enriched_entry)
-
-    return enriched_entries
-
-
 def format_bytes(num_bytes: int | None) -> str:
     """
-    Convert byte count into a human-readable string (for logging purpose only).
+    Convert a byte count into a human-readable string.
+
+    Args:
+        num_bytes: number of bytes to format. If None, return "unknown".
+
+    Returns:
+        Human-readable byte string such as "1.25 MB"
     """
     if num_bytes is None:
         return "unknown"
@@ -142,33 +84,7 @@ def format_bytes(num_bytes: int | None) -> str:
     return f"{num_bytes} B"
 
 
-def get_total_required_bytes(remote_metadata_list: list[dict]) -> int:
-    """
-    Sum content_length across remote source files.
-
-    Args:
-        remote_metadata_list: list of remote metadata dictionaries
-
-    Returns:
-        Total required bytes
-    """
-    total_bytes = 0
-
-    for metadata in remote_metadata_list:
-        response_ok = metadata.get("ok")
-        content_length = metadata.get("content_length")
-        if response_ok and content_length is not None:
-            total_bytes += content_length
-
-    logger.info(
-        "Total download size: %s for %d files",
-        format_bytes(total_bytes),
-        len(remote_metadata_list),
-    )
-
-    return total_bytes
-
-
+# TODO: optional lightweight disk safety check
 def check_local_free_space(
     target_base_path: Path | str,
     required_bytes: int,
@@ -199,7 +115,7 @@ def check_local_free_space(
             format_bytes(free_bytes),
         )
     else:
-        logger.info(f"Disk space check passed: {format_bytes(free_bytes)} available")
+        logger.info("Disk space check passed: %s available", format_bytes(free_bytes))
 
     return {
         "target_base_path": str(target_path),
@@ -210,15 +126,14 @@ def check_local_free_space(
 
 
 def download_file(
+    session: requests.Session,
     source_url: str,
     target_path: Path | str,
     timeout: int = 30,
     chunk_size: int = 1024 * 1024,
     skip_existing: bool = True,
     cleanup_partial_on_failure: bool = True,
-    expected_size_bytes: int | None = None,
-    max_attempts: int = 3,
-    retry_delay_seconds: float = 2.0,
+    max_attempts: int = 2,
 ) -> dict:
     """
     Download a file from source_url to target_path using streamed HTTP GET.
@@ -227,55 +142,44 @@ def download_file(
     to the final target path after the download completes successfully.
 
     Args:
+        session: HTTP session used to issue the download request
         source_url: remote file URL
         target_path: local destination path
         timeout: request timeout in seconds
         chunk_size: bytes per chunk when streaming response
         skip_existing: whether to skip download if target file already exists
         cleanup_partial_on_failure: whether to delete `.part` file on failure
-        expected_size_bytes: expected final file size in bytes. If provided,
-            validate that the completed download matches this size before
-            renaming the temporary file.
         max_attempts: maximum number of total download attempts
-        retry_delay_seconds: number of seconds to wait before the next attempt
-            after a failure.
 
     Returns:
-        Dictionary describing download result
+        Dictionary containing the download result and associated metadata
     """
+    start_time = time.time()
+
     target_file = Path(target_path)
     temp_target_file = Path(str(target_file) + ".part")
     target_file.parent.mkdir(parents=True, exist_ok=True)
     logger.debug(
-        "Preparing download: source_url=%s, target_path=%s, expected_size=%s, max_attempts=%d",
+        "Preparing download: source_url=%s, target_path=%s, max_attempts=%d",
         source_url,
         target_file,
-        format_bytes(expected_size_bytes),
         max_attempts,
     )
 
-    # skip download if file already exist and match the expected size
+    # skip download if file already exist
     if skip_existing and target_file.exists():
-        existing_size = target_file.stat().st_size
-        if expected_size_bytes is None or existing_size == expected_size_bytes:
-            logger.info(f"File exists and size matches, skipping: {target_file}")
-            return {
-                "source_url": source_url,
-                "target_path": str(target_file),
-                "temp_target_path": str(temp_target_file),
-                "bytes_written": 0,
-                "existing_file_size": existing_size,
-                "expected_size_bytes": expected_size_bytes,
-                "status": "skipped",
-                "error": None,
-            }
-
-        logger.warning(
-            "Size mismatch for %s, redownloading (Local: %s, Remote: %s)",
-            target_file,
-            format_bytes(existing_size),
-            format_bytes(expected_size_bytes),
-        )
+        logger.info("File exists, skipping: %s", target_file)
+        duration = time.time() - start_time
+        return {
+            "source_url": source_url,
+            "target_path": str(target_file),
+            "temp_target_path": str(temp_target_file),
+            "bytes_written": 0,
+            "status": "skipped",
+            "error": None,
+            "attempts": 0,
+            "duration_seconds": duration,
+        }
 
     last_error = None
 
@@ -284,12 +188,12 @@ def download_file(
 
         # clean up stale .part file from previous failed run
         if temp_target_file.exists():
-            logger.debug(f"Found stale temp file, removing {temp_target_file}")
+            logger.debug("Found stale temp file, removing %s", temp_target_file)
             temp_target_file.unlink()
 
         try:
             # request data & write to target destination by chuncks
-            with requests.get(source_url, stream=True, timeout=timeout) as response:
+            with session.get(source_url, stream=True, timeout=timeout) as response:
                 response.raise_for_status()
 
                 content_length_raw = response.headers.get("Content-Length")
@@ -303,44 +207,53 @@ def download_file(
                 )
 
                 with temp_target_file.open("wb") as f:
+                    last_log_time = time.time()
                     for chunk in response.iter_content(chunk_size=chunk_size):
                         if not chunk:
                             continue
+
                         f.write(chunk)
                         bytes_written += len(chunk)
 
-            # validate if bytes_written match with expected_size_bytes
-            # if not, raise ValueError (will retry if max_retries not reached)
-            if expected_size_bytes is not None and bytes_written != expected_size_bytes:
-                raise ValueError(
-                    f"downloaded size mismatch: wrote {bytes_written} bytes, "
-                    f"expected {expected_size_bytes} bytes"
-                )
+                        # progress logging (every ~1 sec)
+                        now = time.time()
+                        if content_length and (now - last_log_time > 10):
+                            percent = (bytes_written / content_length) * 100
+
+                            logger.info(
+                                "[%s] progress: %s / %s (%.1f%%)",
+                                target_file.name,
+                                format_bytes(bytes_written),
+                                format_bytes(content_length),
+                                percent,
+                            )
+
+                            last_log_time = now
 
             # if download success, move temp file into final target path
             # and return success status
             temp_target_file.replace(target_file)
             logger.info(
-                f"Download completed: {target_file} ({format_bytes(bytes_written)})"
+                "Download completed: %s (%s)", target_file, format_bytes(bytes_written)
             )
+            duration = time.time() - start_time
             return {
                 "source_url": source_url,
                 "target_path": str(target_file),
                 "temp_target_path": str(temp_target_file),
                 "bytes_written": bytes_written,
-                "expected_size_bytes": expected_size_bytes,
                 "status": "downloaded",
                 "error": None,
+                "attempts": attempt,
+                "duration_seconds": duration,
             }
 
         except (requests.RequestException, OSError, ValueError) as e:
             last_error = str(e)
 
-            # remove temporary files
             if cleanup_partial_on_failure and temp_target_file.exists():
                 temp_target_file.unlink()
 
-            # if reached max_attempts, return failed status
             if attempt >= max_attempts:
                 logger.error(
                     "Failed to download %s after %d attempts. Last error: %s",
@@ -348,49 +261,87 @@ def download_file(
                     max_attempts,
                     last_error,
                 )
+                duration = time.time() - start_time
                 return {
                     "source_url": source_url,
                     "target_path": str(target_file),
                     "temp_target_path": str(temp_target_file),
                     "bytes_written": bytes_written,
-                    "expected_size_bytes": expected_size_bytes,
                     "status": "failed",
                     "error": last_error,
+                    "attempts": attempt,
+                    "duration_seconds": duration,
                 }
 
-            # if max_attempts not reached, sleep & retry
-            logger.warning(
-                "Download failed for %s [attempt %d/%d]: %s. Retrying in %.1f seconds.",
-                target_file,
-                attempt,
-                max_attempts,
-                last_error,
-                retry_delay_seconds,
-            )
-            time.sleep(retry_delay_seconds)
+            if isinstance(e, (OSError, ValueError)):
+                # if max_attempts not reached, sleep & retry
+                retry_delay = min(2**attempt, 10)
+                logger.warning(
+                    "Download failed for %s [%d/%d]: %s. Retrying in %.1fs.",
+                    target_file,
+                    attempt,
+                    max_attempts,
+                    last_error,
+                    retry_delay,
+                )
+                time.sleep(retry_delay)
+            else:
+                logger.warning(
+                    "HTTP download failed for %s [attempt %d/%d]: %s. "
+                    "Retrying with session-level backoff.",
+                    target_file,
+                    attempt,
+                    max_attempts,
+                    last_error,
+                )
+                continue
 
-    # fallback return statement (usually will never be reached)
-    logger.error(
-        "Reached unexpected fallback return in download_file for %s. Last error: %s",
-        target_file,
-        last_error,
+
+def build_request_session() -> requests.Session:
+    """
+    Build a reusable HTTP session configured with retry and backoff behavior.
+
+    This session enables:
+    - connection pooling across multiple requests
+    - automatic retries for transient HTTP errors (e.g., 429, 5xx)
+    - exponential backoff between retries
+    - respect for server-provided Retry-After headers
+
+    Returns:
+        A configured requests.Session instance for robust HTTP downloads.
+    """
+    retry = Retry(
+        total=5,
+        connect=5,
+        read=5,
+        status=5,
+        other=0,
+        allowed_methods=frozenset({"GET"}),
+        status_forcelist=[429, 500, 502, 503, 504],
+        backoff_factor=1.0,
+        backoff_jitter=0.5,
+        backoff_max=60,
+        respect_retry_after_header=True,
     )
-    return {
-        "source_url": source_url,
-        "target_path": str(target_file),
-        "temp_target_path": str(temp_target_file),
-        "bytes_written": 0,
-        "expected_size_bytes": expected_size_bytes,
-        "status": "failed",
-        "error": last_error,
-    }
+
+    adapter = HTTPAdapter(
+        max_retries=retry,
+        pool_connections=10,
+        pool_maxsize=10,
+    )
+
+    session = requests.Session()
+    session.mount("http://", adapter)
+    session.mount("https://", adapter)
+
+    return session
 
 
-# TODO: allow download in parallel
 def download_manifest_entries(
     manifest_entries: list[dict],
     target_base_path: Path | str,
     skip_existing: bool = True,
+    max_workers: int = 4,
 ) -> list[dict]:
     """
     Download all files described by manifest entries.
@@ -399,25 +350,25 @@ def download_manifest_entries(
         manifest_entries: list of manifest entry dictionaries
         target_base_path: root data directory
         skip_existing: whether to skip files that already exist locally
+        max_workers: maximum number of worker threads used for parallel downloads
 
     Returns:
         List of download result dictionaries
     """
-    logger.info(f"Starting download of {len(manifest_entries)} entries")
-    download_results = []
 
-    for index, entry in enumerate(manifest_entries, start=1):
-        logger.debug(f"Processing manifest entry {index}/{len(manifest_entries)}")
+    def _download_single(entry: dict) -> dict:
+        session = build_request_session()
+
         full_target_path = resolve_target_path(
             target_base_path=target_base_path,
             target_relative_path=entry["target_relative_path"],
         )
 
         result = download_file(
+            session=session,
             source_url=entry["source_url"],
             target_path=full_target_path,
             skip_existing=skip_existing,
-            expected_size_bytes=entry.get("remote_metadata", {}).get("content_length"),
         )
 
         result.update(
@@ -428,9 +379,48 @@ def download_manifest_entries(
             }
         )
 
-        download_results.append(result)
+        return result
+
+    logger.info("Starting download of %d entries", len(manifest_entries))
+    download_results = []
+
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {
+            executor.submit(_download_single, entry): entry
+            for entry in manifest_entries
+        }
+
+        for future in tqdm(as_completed(futures), total=len(futures)):
+            download_results.append(future.result())
 
     return download_results
+
+
+def group_results_by_status(download_results: list[dict]) -> dict:
+    """
+    Group download results by status.
+
+    Args:
+        download_results: list of per-file download results
+
+    Returns:
+        Dictionary mapping each status to a list of file identifiers
+    """
+    grouped = {
+        "downloaded": [],
+        "skipped": [],
+        "failed": [],
+    }
+
+    for result in download_results:
+        status = result["status"]
+
+        file_id = f"{result['vehicle_type']}/{result['year_month']}/{result['source_file_name']}"
+
+        if status in grouped:
+            grouped[status].append(file_id)
+
+    return grouped
 
 
 def summarize_download_results(download_results: list[dict]) -> dict:
@@ -496,22 +486,35 @@ def write_download_log(
     timestamp_str = now.strftime("%Y%m%dT%H%M%SZ")
     log_path = output_dir / f"download_log_{timestamp_str}.json"
 
+    grouped_results = group_results_by_status(download_results)
+
     payload = {
         "generated_at_utc": now.isoformat(),
         "manifest_path": str(manifest_path),
         "target_base_path": str(target_base_path),
         "summary": summary,
+        "by_status": grouped_results,
         "results": download_results,
     }
 
     with log_path.open("w", encoding="utf-8") as f:
         json.dump(payload, f, indent=2)
-    logger.info(f"Download log written to: {log_path}")
+    logger.info("Download log written to: %s", log_path)
 
     return log_path
 
 
 def run(manifest_path: Path | str) -> Path:
+    """
+    Run the bootstrap downloader using a manifest file.
+
+    Args:
+        manifest_path: path to the manifest JSON file
+
+    Returns:
+        Path to the written download log file
+    """
+
     logger.info("NYC Taxi Data Downloader started")
 
     # load manifest file
@@ -525,47 +528,18 @@ def run(manifest_path: Path | str) -> Path:
         manifest.get("storage"),
     )
 
-    # get remote file metadata and do space check (if on local)
-    manifest_entries = manifest.get("entries", [])
-    remote_metadata_list = [
-        get_remote_file_metadata(entry["source_url"]) for entry in manifest_entries
-    ]
-    required_bytes = get_total_required_bytes(remote_metadata_list)
-
-    target_storage_type = manifest["storage"]["target_storage_type"]
-    target_base_path = manifest["storage"]["target_base_path"]
-    if target_storage_type == "local":
-        space_check = check_local_free_space(
-            target_base_path=target_base_path,
-            required_bytes=required_bytes,
-        )
-        if not space_check["enough_space"]:
-            logger.critical(
-                "Aborting download due to insufficient disk space (required: %s. free space: %s)",
-                format_bytes(space_check["required_bytes"]),
-                format_bytes(space_check["free_bytes"]),
-            )
-            raise RuntimeError(
-                f"Insufficient disk space: required={format_bytes(space_check['required_bytes'])}, free={format_bytes(space_check['free_bytes'])}",
-            )
-    else:
-        logger.info(
-            f"Skipping local disk check for storage type: {target_storage_type}"
-        )
-
     # execute download & summarize results
-    manifest_entries_with_metadata = attach_remote_metadata_to_entries(
-        manifest_entries=manifest_entries,
-        remote_metadata_list=remote_metadata_list,
-    )
+    manifest_entries = manifest.get("entries", [])
+    target_base_path = manifest["storage"]["target_base_path"]
     download_results = download_manifest_entries(
-        manifest_entries=manifest_entries_with_metadata,
+        manifest_entries=manifest_entries,
         target_base_path=target_base_path,
         skip_existing=True,
     )
     summary = summarize_download_results(download_results)
 
     # save download log
+    download_results.sort(key=lambda x: (x["vehicle_type"], x["year_month"]))
     log_path = write_download_log(
         download_results=download_results,
         summary=summary,
@@ -578,6 +552,9 @@ def run(manifest_path: Path | str) -> Path:
 
 
 def main() -> None:
+    """
+    Load runtime configuration, configure logging, and run the downloader.
+    """
     # load & resolve runtime config file
     runtime_config = load_runtime_config()
     resolved_runtime_config = resolve_runtime_config(runtime_config)

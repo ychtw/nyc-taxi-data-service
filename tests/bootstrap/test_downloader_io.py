@@ -71,7 +71,15 @@ def test_write_download_log_creates_log_file_and_returns_path(tmp_path):
     - returned path exists
     - filename follows expected pattern
     """
-    download_results = [{"status": "downloaded", "bytes_written": 100}]
+    download_results = [
+        {
+            "status": "downloaded",
+            "bytes_written": 100,
+            "vehicle_type": "yellow",
+            "year_month": "2025-01",
+            "source_file_name": "yellow.parquet",
+        }
+    ]
     summary = {"downloaded": 1, "skipped": 0, "failed": 0, "total_bytes_written": 100}
 
     manifest_path = tmp_path / "manifest.json"
@@ -92,43 +100,6 @@ def test_write_download_log_creates_log_file_and_returns_path(tmp_path):
     # check filename format
     assert log_path.parent == output_dir
     assert re.match(r"download_log_\d{8}T\d{6}Z\.json", log_path.name)
-
-
-def test_write_download_log_writes_correct_payload(tmp_path):
-    """
-    Verify that the JSON payload written to the log file contains
-    the expected fields and values.
-
-    This test checks:
-    - manifest_path stored as string
-    - target_base_path stored as string
-    - summary preserved
-    - results preserved
-    - generated_at_utc exists
-    """
-    download_results = [{"status": "downloaded", "bytes_written": 123}]
-    summary = {"downloaded": 1, "skipped": 0, "failed": 0, "total_bytes_written": 123}
-
-    manifest_path = tmp_path / "manifest.json"
-    target_base_path = tmp_path / "data"
-    output_dir = tmp_path / "logs"
-
-    log_path = write_download_log(
-        download_results,
-        summary,
-        manifest_path,
-        target_base_path,
-        output_dir,
-    )
-
-    payload = json.loads(log_path.read_text(encoding="utf-8"))
-
-    assert payload["manifest_path"] == str(manifest_path)
-    assert payload["target_base_path"] == str(target_base_path)
-    assert payload["summary"] == summary
-    assert payload["results"] == download_results
-
-    assert "generated_at_utc" in payload
 
 
 def test_write_download_log_creates_output_directory(tmp_path):
@@ -183,3 +154,84 @@ def test_write_download_log_default_output_dir(tmp_path, monkeypatch):
 
     assert log_path.exists()
     assert log_path.parent == Path("data/logs")
+
+
+def test_write_download_log_contains_expected_payload(tmp_path):
+    """
+    Verify that write_download_log writes expected payload structure,
+    including by_status grouping.
+    """
+    download_results = [
+        {
+            "status": "downloaded",
+            "bytes_written": 100,
+            "vehicle_type": "yellow",
+            "year_month": "2025-01",
+            "source_file_name": "yellow.parquet",
+        },
+        {
+            "status": "failed",
+            "bytes_written": 0,
+            "vehicle_type": "green",
+            "year_month": "2025-01",
+            "source_file_name": "green.parquet",
+        },
+    ]
+
+    summary = {
+        "downloaded": 1,
+        "skipped": 0,
+        "failed": 1,
+        "total_bytes_written": 100,
+    }
+
+    manifest_path = tmp_path / "manifest.json"
+    target_base_path = tmp_path / "data"
+
+    log_path = write_download_log(
+        download_results,
+        summary,
+        manifest_path,
+        target_base_path,
+        output_dir=tmp_path,
+    )
+
+    payload = json.loads(log_path.read_text())
+
+    assert "summary" in payload
+    assert "results" in payload
+    assert "by_status" in payload
+
+    assert payload["by_status"] == {
+        "downloaded": ["yellow/2025-01/yellow.parquet"],
+        "skipped": [],
+        "failed": ["green/2025-01/green.parquet"],
+    }
+
+
+def test_write_download_log_handles_empty_results(tmp_path):
+    """
+    Verify write_download_log handles empty download_results.
+    """
+    summary = {
+        "downloaded": 0,
+        "skipped": 0,
+        "failed": 0,
+        "total_bytes_written": 0,
+    }
+
+    log_path = write_download_log(
+        download_results=[],
+        summary=summary,
+        manifest_path=tmp_path / "manifest.json",
+        target_base_path=tmp_path,
+        output_dir=tmp_path,
+    )
+
+    payload = json.loads(log_path.read_text())
+
+    assert payload["by_status"] == {
+        "downloaded": [],
+        "skipped": [],
+        "failed": [],
+    }

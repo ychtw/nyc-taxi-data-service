@@ -3,9 +3,7 @@ from pathlib import Path
 import pytest
 
 from nyc_taxi_data_service.bootstrap.downloader import (
-    attach_remote_metadata_to_entries,
     format_bytes,
-    get_total_required_bytes,
     resolve_target_path,
     summarize_download_results,
 )
@@ -87,195 +85,6 @@ def test_resolve_target_path_returns_path_object(tmp_path):
     result = resolve_target_path(str(tmp_path), "file.parquet")
 
     assert isinstance(result, Path)
-
-
-def test_attach_remote_metadata_to_entries_attaches_matching_metadata():
-    """
-    Verify that each manifest entry is enriched with the matching remote metadata
-    at the same list position.
-
-    This test checks the main expected behavior of the function:
-    - each output item keeps the original manifest entry fields
-    - each output item gains a "remote_metadata" field
-    - metadata is attached by positional order
-    """
-    manifest_entries = [
-        {
-            "source_url": "https://example.com/yellow_2020-01.parquet",
-            "target_relative_path": "yellow/2020-01.parquet",
-            "vehicle_type": "yellow",
-        },
-        {
-            "source_url": "https://example.com/green_2020-01.parquet",
-            "target_relative_path": "green/2020-01.parquet",
-            "vehicle_type": "green",
-        },
-    ]
-    remote_metadata_list = [
-        {
-            "source_url": "https://example.com/yellow_2020-01.parquet",
-            "content_length": 123,
-            "status_code": 200,
-            "ok": True,
-        },
-        {
-            "source_url": "https://example.com/green_2020-01.parquet",
-            "content_length": 456,
-            "status_code": 200,
-            "ok": True,
-        },
-    ]
-
-    result = attach_remote_metadata_to_entries(
-        manifest_entries=manifest_entries,
-        remote_metadata_list=remote_metadata_list,
-    )
-
-    assert result == [
-        {
-            "source_url": "https://example.com/yellow_2020-01.parquet",
-            "target_relative_path": "yellow/2020-01.parquet",
-            "vehicle_type": "yellow",
-            "remote_metadata": remote_metadata_list[0],
-        },
-        {
-            "source_url": "https://example.com/green_2020-01.parquet",
-            "target_relative_path": "green/2020-01.parquet",
-            "vehicle_type": "green",
-            "remote_metadata": remote_metadata_list[1],
-        },
-    ]
-
-
-def test_attach_remote_metadata_to_entries_returns_new_entry_dicts():
-    """
-    Verify that the function returns new dictionaries instead of mutating
-    the original manifest entry objects in place.
-
-    This matters because the implementation copies each entry with dict(entry)
-    before adding "remote_metadata".
-    """
-    manifest_entries = [
-        {
-            "source_url": "https://example.com/yellow_2020-01.parquet",
-            "target_relative_path": "yellow/2020-01.parquet",
-        }
-    ]
-    remote_metadata_list = [
-        {
-            "source_url": "https://example.com/yellow_2020-01.parquet",
-            "content_length": 123,
-        }
-    ]
-
-    result = attach_remote_metadata_to_entries(
-        manifest_entries=manifest_entries,
-        remote_metadata_list=remote_metadata_list,
-    )
-
-    assert result is not manifest_entries
-    assert result[0] is not manifest_entries[0]
-    assert "remote_metadata" not in manifest_entries[0]
-    assert result[0]["remote_metadata"] == remote_metadata_list[0]
-
-
-def test_attach_remote_metadata_to_entries_raises_when_lengths_differ():
-    """
-    Verify that the function raises ValueError when the number of manifest
-    entries and remote metadata items do not match.
-
-    Because the implementation uses zip(..., strict=True), mismatched lengths
-    should be treated as a programming error rather than silently truncating.
-    """
-    manifest_entries = [
-        {
-            "source_url": "https://example.com/yellow_2020-01.parquet",
-            "target_relative_path": "yellow/2020-01.parquet",
-        },
-        {
-            "source_url": "https://example.com/green_2020-01.parquet",
-            "target_relative_path": "green/2020-01.parquet",
-        },
-    ]
-    remote_metadata_list = [
-        {
-            "source_url": "https://example.com/yellow_2020-01.parquet",
-            "content_length": 123,
-        }
-    ]
-
-    with pytest.raises(ValueError):
-        attach_remote_metadata_to_entries(
-            manifest_entries=manifest_entries,
-            remote_metadata_list=remote_metadata_list,
-        )
-
-
-@pytest.mark.parametrize(
-    ("remote_metadata_list", "expected_total"),
-    [
-        # scenario 1: sum all content_length values when every entry is valid
-        # (ok=True and content_length is present).
-        (
-            [
-                {"ok": True, "content_length": 100},
-                {"ok": True, "content_length": 200},
-            ],
-            300,
-        ),
-        # scenario 2: ignore entries whose remote request was not successful
-        # (ok=False), even if content_length is present.
-        (
-            [
-                {"ok": True, "content_length": 100},
-                {"ok": False, "content_length": 999},
-            ],
-            100,
-        ),
-        # scenario 3: ignore entries whose content_length is None,
-        # even if the remote request itself succeeded.
-        (
-            [
-                {"ok": True, "content_length": 100},
-                {"ok": True, "content_length": None},
-            ],
-            100,
-        ),
-        # scenario 4: return 0 when all entries are invalid for summation,
-        # such as failed requests or missing content_length.
-        (
-            [
-                {"ok": False, "content_length": 100},
-                {"ok": True, "content_length": None},
-            ],
-            0,
-        ),
-        # scenario 5: return 0 for an empty input list.
-        (
-            [],
-            0,
-        ),
-    ],
-    ids=[
-        "sums_valid_entries",
-        "ignores_not_ok_entries",
-        "ignores_none_content_length",
-        "all_invalid_returns_zero",
-        "empty_list_returns_zero",
-    ],
-)
-def test_get_total_required_bytes(remote_metadata_list, expected_total):
-    """
-    Verify that get_total_required_bytes sums only valid content_length values.
-
-    This parametrized test covers:
-    - summing multiple valid entries
-    - ignoring entries with ok=False
-    - ignoring entries with content_length=None
-    - returning 0 when no entries are valid
-    - returning 0 for an empty list
-    """
-    assert get_total_required_bytes(remote_metadata_list) == expected_total
 
 
 @pytest.mark.parametrize(
@@ -377,3 +186,83 @@ def test_summarize_download_results(download_results, expected_summary):
     - empty input
     """
     assert summarize_download_results(download_results) == expected_summary
+
+
+@pytest.mark.parametrize(
+    ("download_results", "expected"),
+    [
+        (
+            [
+                {
+                    "status": "downloaded",
+                    "vehicle_type": "yellow",
+                    "year_month": "2025-01",
+                    "source_file_name": "yellow.parquet",
+                },
+                {
+                    "status": "failed",
+                    "vehicle_type": "green",
+                    "year_month": "2025-01",
+                    "source_file_name": "green.parquet",
+                },
+                {
+                    "status": "skipped",
+                    "vehicle_type": "fhv",
+                    "year_month": "2025-01",
+                    "source_file_name": "fhv.parquet",
+                },
+            ],
+            {
+                "downloaded": ["yellow/2025-01/yellow.parquet"],
+                "skipped": ["fhv/2025-01/fhv.parquet"],
+                "failed": ["green/2025-01/green.parquet"],
+            },
+        ),
+        (
+            [],
+            {
+                "downloaded": [],
+                "skipped": [],
+                "failed": [],
+            },
+        ),
+    ],
+    ids=["mixed_results", "empty_input"],
+)
+def test_group_results_by_status(download_results, expected):
+    """
+    Verify that group_results_by_status groups results into file identifiers by status.
+    """
+    from nyc_taxi_data_service.bootstrap.downloader import group_results_by_status
+
+    assert group_results_by_status(download_results) == expected
+
+
+def test_group_results_by_status_ignores_unknown_status():
+    """
+    Verify that unknown statuses are ignored.
+    """
+    from nyc_taxi_data_service.bootstrap.downloader import group_results_by_status
+
+    results = [
+        {
+            "status": "downloaded",
+            "vehicle_type": "yellow",
+            "year_month": "2025-01",
+            "source_file_name": "yellow.parquet",
+        },
+        {
+            "status": "unknown",
+            "vehicle_type": "green",
+            "year_month": "2025-01",
+            "source_file_name": "green.parquet",
+        },
+    ]
+
+    grouped = group_results_by_status(results)
+
+    assert grouped == {
+        "downloaded": ["yellow/2025-01/yellow.parquet"],
+        "skipped": [],
+        "failed": [],
+    }
