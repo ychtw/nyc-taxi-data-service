@@ -223,7 +223,7 @@ def test_load_runtime_config_default(mocker) -> None:
     config = load_runtime_config()
 
     allowed_log_levels = {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}
-    allowed_target_storage_types = {"local"}
+    allowed_target_storage_types = {"local", "s3"}
 
     # assert top-level keys exist
     assert "active_environment" in config
@@ -278,7 +278,17 @@ def test_load_runtime_config_default(mocker) -> None:
 
         target_storage_type = storage_config["target_storage_type"]
         assert f"{target_storage_type}_settings" in storage_config
-        assert "target_base_path" in storage_config[f"{target_storage_type}_settings"]
+
+        settings = storage_config[f"{target_storage_type}_settings"]
+
+        if target_storage_type == "local":
+            assert "target_base_path" in settings
+
+        elif target_storage_type == "s3":
+            assert "bucket_name" in settings
+            # optional but recommended:
+            assert "key_prefix" in settings
+            assert "region_name" in settings
 
         serving_config = env_config["serving"]
         assert "mimic_current_date" in serving_config
@@ -842,10 +852,9 @@ def test_resolve_runtime_config_raises_value_error_when_target_base_path_missing
         resolve_runtime_config(runtime_config)
 
 
-def test_resolve_runtime_config_raises_not_implemented_for_unsupported_storage_type() -> (
-    None
-):
-    """Raise NotImplementedError for unsupported storage backends."""
+def test_resolve_runtime_config_validates_s3_settings() -> None:
+    """Raise ValueError when required S3 settings are missing."""
+
     runtime_config = {
         "active_environment": "dev",
         "defaults": {},
@@ -871,7 +880,7 @@ def test_resolve_runtime_config_raises_not_implemented_for_unsupported_storage_t
     }
 
     with pytest.raises(
-        NotImplementedError,
-        match="Unsupported target_storage_type: s3",
+        ValueError,
+        match="storage.s3_settings.bucket_name is required",
     ):
         resolve_runtime_config(runtime_config)

@@ -1,108 +1,189 @@
-import shutil
-from collections import namedtuple
+from pathlib import Path
+from unittest.mock import patch
 
-from nyc_taxi_data_service.bootstrap.downloader import (
-    check_local_free_space,
+import pytest
+from botocore.exceptions import ClientError
+
+from nyc_taxi_data_service.bootstrap.downloader_storage import (
+    LocalFileWriter,
+    S3FileWriter,
+    build_storage_writer,
+    get_storage_root,
 )
 
-
-class DummyResponse:
-    def __init__(self, status_code, ok, headers):
-        self.status_code = status_code
-        self.ok = ok
-        self.headers = headers
+# ---------------------------
+# Fixtures
+# ---------------------------
 
 
-DiskUsage = namedtuple("DiskUsage", ["total", "used", "free"])
+@pytest.fixture
+def temp_file(tmp_path):
+    """Create a temporary file with content."""
+    f = tmp_path / "temp.parquet"
+    f.write_bytes(b"data")
+    return f
 
 
-def test_check_local_free_space_returns_enough_space_true(tmp_path, monkeypatch):
-    """
-    Verify that enough_space=True is returned when free disk space
-    is greater than or equal to required_bytes.
-    """
+@pytest.fixture
+def local_writer(tmp_path):
+    """Provide a LocalFileWriter with a temp base path."""
+    return LocalFileWriter(target_base_path=tmp_path)
 
-    def mock_disk_usage(path):
-        return DiskUsage(total=1000, used=200, free=800)
 
-    monkeypatch.setattr(shutil, "disk_usage", mock_disk_usage)
+@pytest.fixture
+def mock_s3_client():
+    """Mock boto3 S3 client."""
+    with patch(
+        "nyc_taxi_data_service.bootstrap.downloader_storage.boto3.client"
+    ) as mock:
+        yield mock.return_value
 
-    result = check_local_free_space(
-        target_base_path=tmp_path,
-        required_bytes=500,
+
+@pytest.fixture
+def s3_writer(mock_s3_client):
+    """Provide an S3FileWriter with mocked client."""
+    return S3FileWriter(bucket_name="test-bucket", key_prefix="prefix")
+
+
+# ---------------------------
+# LocalFileWriter tests
+# ---------------------------
+
+
+def test_local_writer_persist_file_moves_file(local_writer, temp_file):
+    """Persisting a file should move it to final destination."""
+    result = local_writer.persist_file(temp_file, "a/b/file.parquet")
+
+    target_path = Path(result)
+
+    assert target_path.exists()
+    assert target_path.read_bytes() == b"data"
+    assert not temp_file.exists()
+
+
+@pytest.mark.parametrize(
+    "exists",
+    [True, False],
+    ids=["file_exists", "file_missing"],
+)
+def test_local_writer_exists(tmp_path, local_writer, exists):
+    """exists() should reflect actual file presence."""
+    rel_path = "file.parquet"
+    target = tmp_path / rel_path
+
+    if exists:
+        target.write_bytes(b"x")
+
+    assert local_writer.exists(rel_path) is exists
+
+
+def test_local_writer_get_target_identifier(local_writer):
+    """Identifier should be resolved full local path."""
+    result = local_writer.get_target_identifier("x/y/file.parquet")
+
+    assert result.endswith("x/y/file.parquet")
+
+
+# ---------------------------
+# S3FileWriter tests
+# ---------------------------
+
+
+@pytest.mark.parametrize(
+    "prefix, rel_path, expected",
+    [
+        ("", "file.parquet", "file.parquet"),
+        ("data", "file.parquet", "data/file.parquet"),
+    ],
+    ids=["no_prefix", "with_prefix"],
+)
+def test_s3_build_object_key(s3_writer, prefix, rel_path, expected):
+    """Object key should include prefix when provided."""
+    s3_writer.key_prefix = prefix
+    assert s3_writer.build_object_key(rel_path) == expected
+
+
+def test_s3_exists_true(s3_writer, mock_s3_client):
+    """exists() should return True when head_object succeeds."""
+    mock_s3_client.head_object.return_value = {}
+
+    assert s3_writer.exists("file.parquet") is True
+
+
+@pytest.mark.parametrize(
+    "error_code",
+    ["404", "NoSuchKey", "NotFound"],
+    ids=["404", "NoSuchKey", "NotFound"],
+)
+def test_s3_exists_false(s3_writer, mock_s3_client, error_code):
+    """exists() should return False for not-found errors."""
+
+    mock_s3_client.head_object.side_effect = ClientError(
+        {"Error": {"Code": error_code}},
+        "HeadObject",
     )
 
-    assert result["target_base_path"] == str(tmp_path)
-    assert result["required_bytes"] == 500
-    assert result["free_bytes"] == 800
-    assert result["enough_space"] is True
+    assert s3_writer.exists("file.parquet") is False
 
 
-def test_check_local_free_space_returns_enough_space_false(tmp_path, monkeypatch):
-    """
-    Verify that enough_space=False is returned when free disk space
-    is smaller than required_bytes.
-    """
+def test_s3_persist_file_uploads_and_deletes(temp_file, s3_writer, mock_s3_client):
+    """persist_file should upload and delete temp file."""
+    result = s3_writer.persist_file(temp_file, "file.parquet")
 
-    def mock_disk_usage(path):
-        return DiskUsage(total=1000, used=950, free=50)
-
-    monkeypatch.setattr(shutil, "disk_usage", mock_disk_usage)
-
-    result = check_local_free_space(
-        target_base_path=tmp_path,
-        required_bytes=100,
-    )
-
-    assert result["enough_space"] is False
-    assert result["free_bytes"] == 50
+    mock_s3_client.upload_file.assert_called_once()
+    assert not temp_file.exists()
+    assert result.startswith("s3://")
 
 
-def test_check_local_free_space_creates_directory_if_missing(tmp_path, monkeypatch):
-    """
-    Verify that the target_base_path directory is created automatically
-    if it does not exist before calling the function.
-    """
-
-    def mock_disk_usage(path):
-        return DiskUsage(total=1000, used=100, free=900)
-
-    monkeypatch.setattr(shutil, "disk_usage", mock_disk_usage)
-
-    new_dir = tmp_path / "new_dir"
-
-    assert not new_dir.exists()
-
-    result = check_local_free_space(
-        target_base_path=new_dir,
-        required_bytes=100,
-    )
-
-    assert new_dir.exists()
-    assert result["target_base_path"] == str(new_dir)
+# ---------------------------
+# Factory + helpers
+# ---------------------------
 
 
-def test_check_local_free_space_calls_disk_usage_with_created_path(
-    tmp_path, monkeypatch
-):
-    """
-    Verify that shutil.disk_usage is called with the resolved Path
-    after the directory is created.
-    """
+@pytest.mark.parametrize(
+    "config, expected_type",
+    [
+        ({"target_storage_type": "local", "target_base_path": "data"}, LocalFileWriter),
+        (
+            {
+                "target_storage_type": "s3",
+                "bucket_name": "b",
+            },
+            S3FileWriter,
+        ),
+    ],
+    ids=["local", "s3"],
+)
+def test_build_storage_writer(config, expected_type):
+    """Factory should return correct writer type."""
+    writer = build_storage_writer(config)
+    assert isinstance(writer, expected_type)
 
-    called_paths = []
 
-    def mock_disk_usage(path):
-        called_paths.append(path)
-        return DiskUsage(total=1000, used=100, free=900)
+def test_build_storage_writer_invalid_type():
+    """Invalid storage type should raise ValueError."""
+    with pytest.raises(ValueError):
+        build_storage_writer({"target_storage_type": "invalid"})
 
-    monkeypatch.setattr(shutil, "disk_usage", mock_disk_usage)
 
-    target_dir = tmp_path / "space_check"
-
-    check_local_free_space(
-        target_base_path=target_dir,
-        required_bytes=10,
-    )
-
-    assert called_paths == [target_dir]
+@pytest.mark.parametrize(
+    "config, expected",
+    [
+        (
+            {"target_storage_type": "local", "target_base_path": "/data"},
+            "/data",
+        ),
+        (
+            {"target_storage_type": "s3", "bucket_name": "b", "key_prefix": "x"},
+            "s3://b/x",
+        ),
+        (
+            {"target_storage_type": "s3", "bucket_name": "b"},
+            "s3://b",
+        ),
+    ],
+    ids=["local", "s3_with_prefix", "s3_no_prefix"],
+)
+def test_get_storage_root(config, expected):
+    """get_storage_root should build correct identifier."""
+    assert get_storage_root(config) == expected

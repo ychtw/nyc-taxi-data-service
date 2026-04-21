@@ -218,6 +218,36 @@ def resolve_runtime_config(runtime_config: dict) -> dict:
             "target_storage_type": "local",
             "target_base_path": target_base_path,
         }
+
+    elif target_storage_type == "s3":
+        s3_settings = storage_config.get("s3_settings")
+        if not s3_settings:
+            raise ValueError(
+                "storage.s3_settings is required when target_storage_type='s3'"
+            )
+
+        bucket_name = s3_settings.get("bucket_name")
+        if not bucket_name:
+            raise ValueError(
+                "storage.s3_settings.bucket_name is required when "
+                "target_storage_type='s3'"
+            )
+
+        resolved_config["storage"] = {
+            "target_storage_type": "s3",
+            "bucket_name": bucket_name,
+            "key_prefix": s3_settings.get("key_prefix", ""),
+            "region_name": s3_settings.get("region_name"),
+            "endpoint_url": s3_settings.get("endpoint_url"),
+        }
+
+        logger.debug(
+            "Resolved S3 storage config: bucket=%s, prefix=%s, endpoint=%s",
+            bucket_name,
+            s3_settings.get("key_prefix"),
+            s3_settings.get("endpoint_url"),
+        )
+
     else:
         # TODO: update this when more storage types are supported
         logger.error(f"Unsupported storage type detected: {target_storage_type}")
