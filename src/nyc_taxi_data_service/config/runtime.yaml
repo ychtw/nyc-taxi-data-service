@@ -87,10 +87,10 @@ environments:
       local_settings:
         target_base_path: data/raw
       s3_settings:
-        bucket_name: ${BOOTSTRAP_BUCKET_NAME:-test-bucket}
+        bucket_name: ${BOOTSTRAP_BUCKET_NAME:-nyc-taxi-data-service}
         key_prefix: ${S3_KEY_PREFIX:-raw}
         region_name: ${AWS_DEFAULT_REGION:-us-east-1}
-        endpoint_url: ${S3_ENDPOINT_URL:-http://localhost:4566}
+        endpoint_url: ${S3_ENDPOINT_URL:-}
 
     time_frame:
       # earliest month the user wants to request

@@ -106,11 +106,14 @@ class S3FileWriter(StorageWriter):
         """
         self.bucket_name = bucket_name
         self.key_prefix = key_prefix.strip("/")
-        self.client = boto3.client(
-            "s3",
-            region_name=region_name,
-            endpoint_url=endpoint_url,
-        )
+
+        client_kwargs = {
+            "service_name": "s3",
+            "region_name": region_name,
+        }
+        if endpoint_url:
+            client_kwargs["endpoint_url"] = endpoint_url
+        self.client = boto3.client(**client_kwargs)
 
     def build_object_key(self, target_relative_path: str) -> str:
         """
