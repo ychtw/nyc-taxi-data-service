@@ -1,0 +1,18 @@
+services:
+  aws-cli:
+    image: amazon/aws-cli:latest
+    container_name: nyc-taxi-aws-cli
+    env_file:
+      - ../env/.env.aws
+    entrypoint: [ "aws" ]
+  bootstrap-downloader:
+    build:
+      context: ../..
+      dockerfile: infra/docker/Dockerfile.bootstrap
+    container_name: nyc-taxi-bootstrap
+    env_file:
+      - ../env/.env.aws
+    volumes:
+      - ${HOST_DATA_DIR}:/app/data
+    working_dir: /app
+    # command: [ "python", "-m", "nyc_taxi_data_service.bootstrap.pipeline" ]
