@@ -10,6 +10,9 @@ from nyc_taxi_data_service.serving.api.rate_limit import (
     register_rate_limit_middleware,
 )
 from nyc_taxi_data_service.serving.api.service import HistoricalApiService
+from nyc_taxi_data_service.serving.api.service_context import (
+    build_service_context_payload,
+)
 from nyc_taxi_data_service.serving.common.log_time import format_log_dt
 from nyc_taxi_data_service.serving.common.service_clock_loader import (
     _build_service_clock,
@@ -67,12 +70,17 @@ def create_app() -> FastAPI:
     app.state.api_service = HistoricalApiService(
         resolved_runtime_config=resolved_runtime_config
     )
+    app.state.service_context = build_service_context_payload(resolved_runtime_config)
 
     logger.info(
         "Starting NYC taxi historical API service | mimic_current_date=%s | mimic_service_start_time=%s",
         mimic_current_date,
         format_log_dt(app.state.service_clock.mimic_service_start_time),
     )
+
+    @api_router.get("/service/context")
+    def get_service_context(request: Request) -> dict:
+        return request.app.state.service_context
 
     @api_router.get("/trips/{vehicle_type}")
     def get_trips(
