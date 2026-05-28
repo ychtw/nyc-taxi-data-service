@@ -71,7 +71,10 @@ def build_runtime_config(rate_limit_enabled: bool = True) -> dict:
                 }
             },
         },
-        "storage": {"target_base_path": "data/raw"},
+        "storage": {
+            "target_storage_type": "local",
+            "target_base_path": "data/raw",
+        },
         "time_frame": {
             "start_year_month": "2025-01",
             "end_year_month": "2025-03",
@@ -117,7 +120,10 @@ def api_test_data_dir(tmp_path: Path) -> Path:
 def resolved_runtime_config(api_test_data_dir: Path) -> dict:
     """Return minimal runtime config for endpoint tests."""
     return {
-        "storage": {"target_base_path": str(api_test_data_dir)},
+        "storage": {
+            "target_storage_type": "local",
+            "target_base_path": str(api_test_data_dir),
+        },
         "serving": {
             "service_event_time_column_by_vehicle_type": {
                 "yellow": "tpep_dropoff_datetime",
@@ -357,10 +363,33 @@ def test_create_app_skips_rate_limit_when_disabled(mocker):
 
 
 def test_get_service_context_returns_payload(client):
-    """Return service context from app state."""
-    api_app_module.app.state.service_context = {"test": "value"}
-
+    """Return dynamically generated service context payload."""
     response = client.get("/api/v1/service/context")
 
+    payload = response.json()
+
     assert response.status_code == 200
-    assert response.json() == {"test": "value"}
+
+    assert payload["time_frame"] == {
+        "start_year_month": "2025-01",
+        "end_year_month": "2025-03",
+    }
+
+    assert payload["vehicle_types"] == [
+        "yellow",
+        "green",
+        "fhv",
+        "fhvhv",
+    ]
+
+    assert payload["serving"]["mimic_current_datetime"] == ("2025-01-15T09:30:00-05:00")
+
+
+def test_get_service_context_uses_current_service_clock_time(client):
+    """Service context includes current mimic datetime."""
+    response = client.get("/api/v1/service/context")
+
+    assert (
+        response.json()["serving"]["mimic_current_datetime"]
+        == "2025-01-15T09:30:00-05:00"
+    )

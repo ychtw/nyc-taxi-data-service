@@ -1,12 +1,14 @@
 from typing import Any
 
+from nyc_taxi_data_service.serving.common.service_clock import ServiceClock
+
 
 def build_service_context_payload(
-    resolved_runtime_config: dict[str, Any],
+    resolved_runtime_config: dict[str, Any], service_clock: ServiceClock | None = None
 ) -> dict[str, Any]:
     serving = resolved_runtime_config["serving"]
 
-    return {
+    payload = {
         "time_frame": resolved_runtime_config["time_frame"],
         "vehicle_types": resolved_runtime_config["vehicle_types"],
         "serving": {
@@ -17,3 +19,8 @@ def build_service_context_payload(
             ),
         },
     }
+
+    if service_clock is not None:
+        payload["serving"]["mimic_current_datetime"] = service_clock.now().isoformat()
+
+    return payload
