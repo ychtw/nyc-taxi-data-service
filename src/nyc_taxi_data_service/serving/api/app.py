@@ -70,7 +70,6 @@ def create_app() -> FastAPI:
     app.state.api_service = HistoricalApiService(
         resolved_runtime_config=resolved_runtime_config
     )
-    app.state.service_context = build_service_context_payload(resolved_runtime_config)
 
     logger.info(
         "Starting NYC taxi historical API service | mimic_current_date=%s | mimic_service_start_time=%s",
@@ -80,7 +79,10 @@ def create_app() -> FastAPI:
 
     @api_router.get("/service/context")
     def get_service_context(request: Request) -> dict:
-        return request.app.state.service_context
+        return build_service_context_payload(
+            resolved_runtime_config,
+            service_clock=request.app.state.service_clock,
+        )
 
     @api_router.get("/trips/{vehicle_type}")
     def get_trips(
