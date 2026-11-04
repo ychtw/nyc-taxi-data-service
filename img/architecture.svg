@@ -1,0 +1,90 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1500" height="805" viewBox="-445 0 1500 805">
+<defs>
+  <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto">
+    <path d="M0,0 L10,5 L0,10 z" fill="#1f78ad"/>
+  </marker>
+  <style>
+    .line{stroke:#1f78ad;stroke-width:2.2;fill:none;marker-end:url(#arrow)}
+    .dash{stroke:#1f78ad;stroke-width:2.2;fill:none;stroke-dasharray:7 7;marker-end:url(#arrow)}
+    .box{fill:#f5f9fc;stroke:#1f78ad;stroke-width:2}
+    .group{fill:#f7fafc;fill-opacity:.92;stroke:#1f78ad;stroke-width:2}
+    .text{font-family:Arial,Helvetica,sans-serif;fill:#27364a;font-size:22px}
+    .small{font-family:Arial,Helvetica,sans-serif;fill:#27364a;font-size:19px}
+    .labelbg{fill:#fff;fill-opacity:.92}
+  </style>
+</defs>
+
+<!-- NYC TLC Open Data -->
+<g>
+  <rect x="-420" y="62" width="145" height="98" fill="#f5f9fc" stroke="#1f78ad" stroke-width="2"/>
+  <ellipse cx="-347.5" cy="62" rx="72.5" ry="17" fill="#f5f9fc" stroke="#1f78ad" stroke-width="2"/>
+  <ellipse cx="-347.5" cy="160" rx="72.5" ry="17" fill="#f5f9fc" stroke="#1f78ad" stroke-width="2"/>
+  <rect x="-418" y="62" width="141" height="98" fill="#f5f9fc"/>
+  <path d="M -420 62 C -420 72 -388 79 -347.5 79 C -307 79 -275 72 -275 62" fill="none" stroke="#1f78ad" stroke-width="2"/>
+  <path d="M -420 160 C -420 170 -388 177 -347.5 177 C -307 177 -275 170 -275 160" fill="none" stroke="#1f78ad" stroke-width="2"/>
+  <line x1="-420" y1="62" x2="-420" y2="160" stroke="#1f78ad" stroke-width="2"/>
+  <line x1="-275" y1="62" x2="-275" y2="160" stroke="#1f78ad" stroke-width="2"/>
+  <text class="text" x="-347.5" y="111" text-anchor="middle"><tspan x="-347.5">NYC TLC</tspan><tspan x="-347.5" dy="30">Open Data</tspan></text>
+</g>
+
+<path class="line" d="M -275 111 L -225 111"/>
+
+<rect class="box" x="-225" y="59" width="195" height="105"/>
+<text class="text" x="-127.5" y="105" text-anchor="middle"><tspan x="-127.5">Bootstrap</tspan><tspan x="-127.5" dy="30">download</tspan></text>
+
+<path class="line" d="M -30 111 L 35 111"/>
+
+<g>
+  <rect x="35" y="62" width="175" height="100" fill="#f5f9fc" stroke="#1f78ad" stroke-width="2"/>
+  <ellipse cx="122.5" cy="62" rx="87.5" ry="18" fill="#f5f9fc" stroke="#1f78ad" stroke-width="2"/>
+  <ellipse cx="122.5" cy="162" rx="87.5" ry="18" fill="#f5f9fc" stroke="#1f78ad" stroke-width="2"/>
+  <rect x="37" y="62" width="171" height="100" fill="#f5f9fc"/>
+  <path d="M 35 62 C 35 73 74 80 122.5 80 C 171 80 210 73 210 62" fill="none" stroke="#1f78ad" stroke-width="2"/>
+  <path d="M 35 162 C 35 173 74 180 122.5 180 C 171 180 210 173 210 162" fill="none" stroke="#1f78ad" stroke-width="2"/>
+  <line x1="35" y1="62" x2="35" y2="162" stroke="#1f78ad" stroke-width="2"/>
+  <line x1="210" y1="62" x2="210" y2="162" stroke="#1f78ad" stroke-width="2"/>
+  <text class="text" x="122.5" y="110" text-anchor="middle"><tspan x="122.5">Trip data</tspan><tspan x="122.5" dy="30">(local or S3)</tspan></text>
+</g>
+
+<rect class="box" x="385" y="705" width="220" height="75"/>
+<text class="text" x="495" y="752" text-anchor="middle">API clients</text>
+
+<rect class="group" x="255" y="25" width="775" height="600"/>
+<text class="text" x="642.5" y="60" text-anchor="middle">Serving</text>
+
+<rect class="box" x="630" y="85" width="350" height="105"/>
+<text class="text" x="805" y="130" text-anchor="middle"><tspan x="805">initializer</tspan><tspan x="805" dy="30">(writes shared clock anchor)</tspan></text>
+
+<rect class="box" x="365" y="305" width="270" height="100"/>
+<text class="text" x="500" y="348" text-anchor="middle"><tspan x="500">Historical trip API</tspan><tspan x="500" dy="30">(FastAPI)</tspan></text>
+
+<rect class="box" x="715" y="305" width="215" height="100"/>
+<text class="text" x="822.5" y="348" text-anchor="middle"><tspan x="822.5">Simulated live feed</tspan><tspan x="822.5" dy="30">(Kafka producer)</tspan></text>
+
+<path class="line" d="M 210 125 C 300 140 320 260 395 305"/>
+<rect class="labelbg" x="285" y="235" width="245" height="34"/>
+<text class="small" x="407.5" y="259" text-anchor="middle">event_time &lt; mimic_now</text>
+
+<path class="line" d="M 210 112 C 390 132 590 200 748 305"/>
+<rect class="labelbg" x="340" y="140" width="255" height="34"/>
+<text class="small" x="467.5" y="164" text-anchor="middle">event_time &gt;= mimic_now</text>
+<path class="line" d="M 500 405 L 500 705"/>
+
+<path class="dash" d="M 765 190 C 700 245 620 275 585 305"/>
+<rect class="labelbg" x="640" y="208" width="145" height="32"/>
+<text class="small" x="712.5" y="231" text-anchor="middle">shared anchor</text>
+
+<path class="dash" d="M 845 190 C 875 230 885 265 860 305"/>
+<rect class="labelbg" x="805" y="236" width="145" height="32"/>
+<text class="small" x="877.5" y="259" text-anchor="middle">shared anchor</text>
+
+<path class="line" d="M 822.5 405 L 822.5 485"/>
+
+<rect class="box" x="685" y="487" width="275" height="100"/>
+<text class="text" x="822.5" y="527" text-anchor="middle"><tspan x="822.5">Kafka topics</tspan><tspan x="822.5" dy="30">nyc_taxi_{vehicle_type}</tspan></text>
+
+<path class="line" d="M 822.5 587 L 822.5 705"/>
+
+<rect class="box" x="695" y="705" width="255" height="75"/>
+<text class="text" x="822.5" y="752" text-anchor="middle">Kafka consumers</text>
+</svg>
