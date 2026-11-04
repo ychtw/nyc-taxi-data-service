@@ -6,33 +6,7 @@ Simulated NYC Taxi data service exposing historical data through a REST API and 
 
 ## Architecture
 
-```mermaid
-flowchart TB
-    TLC[("NYC TLC<br/>Open Data")]
-
-    DL["Bootstrap<br/>(one-time)"]
-    Lake[("Trip data<br/>local disk or S3")]
-
-    subgraph Serving["Serving (long-running)"]
-        Init["initializer<br/>writes shared clock anchor"]
-        API["api — FastAPI<br/>historical queries"]
-        Stream["streaming<br/>Kafka replay"]
-        Init -.->|shared anchor| API
-        Init -.->|shared anchor| Stream
-    end
-
-    Kafka[("Kafka topics<br/>nyc_taxi_{vehicle_type}")]
-    Client["API clients"]
-    Consumer["Kafka consumers"]
-
-    TLC --> DL --> Lake
-    Lake --> API
-    Lake --> Stream
-    Stream --> Kafka
-
-    Client -->|"event_time < mimic_now"| API
-    Kafka -->|"event_time >= mimic_now"| Consumer
-```
+![architecture-graph](./img/architecture.svg)
 
 The service runs in two phases:
 
