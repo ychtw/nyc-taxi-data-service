@@ -6,7 +6,13 @@ Simulated NYC Taxi data service exposing historical data through a REST API and 
 
 ## Architecture
 
-![architecture-graph](./img/architecture.svg)
+<p align="center">
+  <img
+    src="./img/architecture.svg"
+    alt="Architecture-graph"
+    width="80%"
+  />
+</p>
 
 The service runs in two phases:
 
