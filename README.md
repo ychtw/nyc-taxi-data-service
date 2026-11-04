@@ -10,7 +10,7 @@ Simulated NYC Taxi data service exposing historical data through a REST API and 
   <img
     src="./img/architecture.svg"
     alt="Architecture-graph"
-    width="80%"
+    width="90%"
   />
 </p>
 
